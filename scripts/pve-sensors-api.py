@@ -585,8 +585,6 @@ class Handler(BaseHTTPRequestHandler):
         return smart_data
 
     def _get_disk_info_safe(self, device, device_type, timeout=10):
-        device_key = device.replace("/dev/", "")
-
         try:
             if device_type == "scsi":
                 base_cmd = ["smartctl", "-a", "-d", "scsi"]
@@ -1100,14 +1098,14 @@ def main():
     print(f"PVE Sensors API v2 started on port {port}")
     print(f"Allowed client IPs: {', '.join(sorted(ALLOWED_IPS))}")
     print("Endpoints:")
-    print(f"  GET /sensors         - lm-sensors data")
-    print(f"  GET /smart           - Basic SMART data (fast)")
-    print(f"  GET /smart-disk      - One disk with optional standby protection")
-    print(f"  GET /smart-extended  - Extended SMART data")
-    print(f"  GET /memory          - Memory module information")
-    print(f"  GET /health          - System health status")
-    print(f"  GET /mounts          - Disk mount status")
-    print(f"  GET /ksm             - KSM status and counters")
+    print("  GET /sensors         - lm-sensors data")
+    print("  GET /smart           - Basic SMART data (fast)")
+    print("  GET /smart-disk      - One disk with optional standby protection")
+    print("  GET /smart-extended  - Extended SMART data")
+    print("  GET /memory          - Memory module information")
+    print("  GET /health          - System health status")
+    print("  GET /mounts          - Disk mount status")
+    print("  GET /ksm             - KSM status and counters")
     server.serve_forever()
 
 

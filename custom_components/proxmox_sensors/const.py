@@ -23,4 +23,6 @@ SERVER_PBS = "PBS"
 
 # Additional configuration attributes
 CONF_VERIFY_SSL = "verify_ssl"
+# SHA-256 of the server certificate, pinned when verify_ssl is off.
+CONF_CERT_FINGERPRINT = "cert_fingerprint"
 CONF_PORT = "port"

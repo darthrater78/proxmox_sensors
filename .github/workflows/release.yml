@@ -1,0 +1,165 @@
+name: Release
+
+# HACS installs the integration straight from the tagged source, so the
+# integration itself needs no artifact. The sidecar is different: it runs as
+# root on each Proxmox host, so every release attaches the exact sidecar and
+# installer files with a SHA256SUMS file and a signed build-provenance
+# attestation. The installer downloads these release assets and checks them.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Being on the default branch proves a commit was merged, not that CI passed
+  # on it. This job checks both before anything is published.
+  gate:
+    runs-on: ubuntu-latest
+    # The CI wait loop below gives up after 30 minutes; this is the backstop.
+    timeout-minutes: 35
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify tag is on default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/$DEFAULT_BRANCH"; then
+            echo "::error::Tag $GITHUB_REF_NAME is not on $DEFAULT_BRANCH. Releases come from the default branch only."
+            exit 1
+          fi
+
+      - name: Require a passing CI run for this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          deadline=$(( $(date +%s) + 1800 ))
+          while true; do
+            runs=$(gh api \
+              "repos/${REPO}/actions/workflows/ci.yml/runs?head_sha=${SHA}&per_page=100" \
+              --jq '.workflow_runs[] | "\(.status) \(.conclusion) \(.html_url)"')
+
+            if [ -z "$runs" ]; then
+              echo "::error::CI has never run for ${SHA}, so nothing has tested this commit."
+              echo "Push the branch so CI runs on it, or dispatch it by hand" >&2
+              echo "(Actions -> CI -> Run workflow), then re-tag." >&2
+              exit 1
+            fi
+
+            if printf '%s\n' "$runs" | awk '$2 == "success" { hit = 1 } END { exit !hit }'; then
+              echo "CI passed for ${SHA}."
+              exit 0
+            fi
+
+            unfinished=$(printf '%s\n' "$runs" | awk '$1 != "completed"' | wc -l)
+            if [ "$unfinished" -eq 0 ]; then
+              echo "::error::CI ran for ${SHA} and did not pass. Refusing to release."
+              printf '%s\n' "$runs" | sed 's/^/  /' >&2
+              exit 1
+            fi
+
+            echo "CI is still running for ${SHA} (${unfinished} unfinished) -- waiting."
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::Timed out waiting for CI on ${SHA} to finish."
+              exit 1
+            fi
+            sleep 20
+          done
+
+  release:
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: release
+    permissions:
+      contents: write       # create the GitHub release
+      id-token: write       # sign the provenance attestation (OIDC)
+      attestations: write   # store the attestation
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify tag matches the version in the tagged commit
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="$(jq -r .version custom_components/proxmox_sensors/manifest.json)"
+          if [ -z "$version" ] || [ "$version" = "null" ]; then
+            echo "::error::No version found in manifest.json. Refusing to publish."
+            exit 1
+          fi
+          if [ "v${version}" != "$TAG" ]; then
+            echo "::error::Tag $TAG is on a commit that declares ${version}. Merge the release first, then tag the merged commit."
+            exit 1
+          fi
+
+      - name: Extract release notes
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            index($0, "## [" v "]") == 1 { flag = 1; next }
+            flag && /^## \[/ { exit }
+            flag { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "::error::CHANGELOG.md has no entry for ${version}. Refusing to publish."
+            exit 1
+          fi
+
+      - name: Stage sidecar assets
+        run: |
+          set -euo pipefail
+          mkdir dist
+          cp scripts/pve-sensors-api.py scripts/install-sidecar.sh dist/
+          (cd dist && sha256sum pve-sensors-api.py install-sidecar.sh > SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/pve-sensors-api.py
+            dist/install-sidecar.sh
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file release-notes.md \
+            dist/pve-sensors-api.py dist/install-sidecar.sh dist/SHA256SUMS
+
+      - name: Verify uploaded assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir verify
+          gh release download "$GITHUB_REF_NAME" --dir verify
+          (cd verify && sha256sum -c SHA256SUMS)

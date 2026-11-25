@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from ..const import CONF_PLATFORM_TYPE, DOMAIN
-from .guest_keys import matches_selected_guest
 from .cluster_scope import (
     ACTIVE_SCOPE,
     LEGACY_SCOPE,

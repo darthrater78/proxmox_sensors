@@ -19,6 +19,7 @@ from .const import (
     CONF_NODE,
     CONF_PLATFORM_TYPE,
     CONF_VERIFY_SSL,
+    CONF_CERT_FINGERPRINT,
 )
 from .api import ProxmoxClient
 from .logic.guest_selection import (
@@ -450,6 +451,7 @@ class ProxmoxOptionsFlow(config_entries.OptionsFlow):
             token_secret=conf.get(CONF_TOKEN_SECRET),
             server_type="PVE",
             verify_ssl=conf.get(CONF_VERIFY_SSL, False),
+            cert_fingerprint=conf.get(CONF_CERT_FINGERPRINT),
         )
 
         try:

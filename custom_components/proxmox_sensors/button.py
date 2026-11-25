@@ -21,6 +21,7 @@ from .logic.guest_deletion_cleanup import (
     registered_guest_groups,
 )
 from .pbs_actions import run_gc, run_prune, run_verify, run_sync
+from .services import node_controls_enabled
 from .const import DOMAIN, CONF_NODE, CONF_PLATFORM_TYPE
 from .logic.guest_keys import (
     make_guest_key,
@@ -258,9 +259,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     selected_cts = entry.options.get(
         "selected_cts", entry.data.get("selected_cts", None)
     )
-    enable_node_controls = entry.options.get(
-        "enable_node_controls", entry.data.get("enable_node_controls", True)
-    )
+    enable_node_controls = node_controls_enabled(entry)
 
     node = entry.data.get(CONF_NODE, "Proxmox")
     server_type = entry.data.get(CONF_PLATFORM_TYPE, "PVE")
@@ -400,9 +399,6 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
         prune_jobs_by_datastore = entry.options.get(
             "pbs_prune_jobs_by_datastore", {}
-        )
-        verify_jobs_by_datastore = entry.options.get(
-            "pbs_verify_jobs_by_datastore", {}
         )
         sync_jobs_by_datastore = entry.options.get(
             "pbs_sync_jobs_by_datastore", {}

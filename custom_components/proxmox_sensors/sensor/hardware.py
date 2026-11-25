@@ -5,7 +5,6 @@ import re
 from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
 
 from .base import ProxmoxBaseSensor, node_section
-from ..const import DOMAIN
 
 
 def detect_sensor_type(value):

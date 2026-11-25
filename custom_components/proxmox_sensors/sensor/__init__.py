@@ -84,14 +84,6 @@ from .node import (
 
 from .cluster import (
     ProxmoxBackupJobsSensor,
-    ProxmoxClusterStatusSensor,
-    ProxmoxClusterNodesSensor,
-    ProxmoxClusterCPUSensor,
-    ProxmoxClusterRAMSensor,
-    ProxmoxClusterVMsSensor,
-    ProxmoxClusterCTsSensor,
-    ProxmoxClusterStorageSensor,
-    ProxmoxClusterHASensor,
 )
 
 # Hardware Sensors (lm-sensors)
@@ -929,10 +921,6 @@ async def async_setup_entry(
         "enable_lm_sensors", entry.data.get("enable_lm_sensors", True)
     )
 
-    enable_smart_monitoring = entry.options.get(
-        "enable_smart_monitoring", entry.data.get("enable_smart_monitoring", True)
-    )
-
     enable_node_controls = entry.options.get(
         "enable_node_controls", entry.data.get("enable_node_controls", False)
     )
@@ -947,10 +935,6 @@ async def async_setup_entry(
 
     enable_nodes_list = entry.options.get(
         "enable_nodes_list", entry.data.get("enable_nodes_list", True)
-    )
-
-    enable_cluster = entry.options.get(
-        "enable_cluster", entry.data.get("enable_cluster", True)
     )
 
     enable_guest_agent_metrics = entry.options.get(
@@ -1234,7 +1218,6 @@ async def async_setup_entry(
             is_shared = st.get("shared", 0) == 1
             storage_node = st.get("node")
             storage_path = st.get("path", "")
-            storage_type = st.get("type", "")
 
             # ---- SHARED (PBS, NFS, CIFS...) ----
             if is_shared:

@@ -16,12 +16,18 @@ from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 import homeassistant.helpers.config_validation as cv
+from homeassistant.helpers.selector import (
+    TextSelector,
+    TextSelectorConfig,
+    TextSelectorType,
+)
 from homeassistant.helpers.translation import async_get_translations
 from homeassistant.helpers import entity_registry as er, device_registry as dr
 
 from .api import (
     AuthenticationError,
     CannotConnect,
+    CertificateMismatchError,
     PermissionError as ProxmoxPermissionError,
     ProxmoxClient,
 )
@@ -35,7 +41,15 @@ from .const import (
     CONF_NODE,
     CONF_PLATFORM_TYPE,
     CONF_VERIFY_SSL,
+    CONF_CERT_FINGERPRINT,
     PDM_IDENTITY_ID,
+)
+from .tls import (
+    DEFAULT_PORTS,
+    CertificateNotPinned,
+    display_fingerprint,
+    fetch_certificate_fingerprint,
+    normalize_fingerprint,
 )
 from .pbs_identity import (
     async_remember_pbs_identity,
@@ -70,6 +84,14 @@ PDM_EXTRA_ENDPOINTS = [
     "resources/subscription",
     "remotes/updates/summary",
 ]
+
+_VALIDATION_ENDPOINTS = {
+    "PVE": (PVE_MIN_ENDPOINTS, PVE_EXTRA_ENDPOINTS),
+    "CLUSTER": (PVE_MIN_ENDPOINTS, PVE_EXTRA_ENDPOINTS),
+    "PBS": (PBS_MIN_ENDPOINTS, PBS_EXTRA_ENDPOINTS),
+    "PDM": (PDM_MIN_ENDPOINTS, PDM_EXTRA_ENDPOINTS),
+}
+_SECRET = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
 
 _HOST_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
 
@@ -313,11 +335,18 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             self._config.update(user_input)
+            confirm = await self._ensure_certificate("credentials_pve", user_input)
+            if confirm is not None:
+                return confirm
             client = self._build_client("PVE")
             try:
                 validation = await self._validate_connection(
                     client, PVE_MIN_ENDPOINTS, PVE_EXTRA_ENDPOINTS
                 )
+            except CertificateMismatchError:
+                errors["base"] = "certificate_changed"
+            except CertificateNotPinned:
+                errors["base"] = "cannot_connect"
             except AuthenticationError as err:
                 _LOGGER.debug(
                     "PVE credential validation failed with %s: %s",
@@ -370,11 +399,18 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             self._config.update(user_input)
+            confirm = await self._ensure_certificate("credentials_pbs", user_input)
+            if confirm is not None:
+                return confirm
             client = self._build_client("PBS")
             try:
                 validation = await self._validate_connection(
                     client, PBS_MIN_ENDPOINTS, PBS_EXTRA_ENDPOINTS
                 )
+            except CertificateMismatchError:
+                errors["base"] = "certificate_changed"
+            except CertificateNotPinned:
+                errors["base"] = "cannot_connect"
             except AuthenticationError as err:
                 _LOGGER.debug(
                     "PBS credential validation failed with %s: %s",
@@ -433,11 +469,18 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         }
         if user_input is not None:
             self._config.update(user_input)
+            confirm = await self._ensure_certificate("credentials_pdm", user_input)
+            if confirm is not None:
+                return confirm
             client = self._build_client("PDM")
             try:
                 validation = await self._validate_connection(
                     client, PDM_MIN_ENDPOINTS, PDM_EXTRA_ENDPOINTS
                 )
+            except CertificateMismatchError:
+                errors["base"] = "certificate_changed"
+            except CertificateNotPinned:
+                errors["base"] = "cannot_connect"
             except AuthenticationError:
                 errors["base"] = "invalid_auth"
             except ProxmoxPermissionError:
@@ -480,11 +523,18 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             self._config.update(user_input)
+            confirm = await self._ensure_certificate("credentials_cluster", user_input)
+            if confirm is not None:
+                return confirm
             client = self._build_client("PVE")
             try:
                 validation = await self._validate_connection(
                     client, PVE_MIN_ENDPOINTS, PVE_EXTRA_ENDPOINTS
                 )
+            except CertificateMismatchError:
+                errors["base"] = "certificate_changed"
+            except CertificateNotPinned:
+                errors["base"] = "cannot_connect"
             except AuthenticationError as err:
                 _LOGGER.debug(
                     "Cluster credential validation failed with %s: %s",
@@ -534,6 +584,127 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             token_secret=self._config.get(CONF_TOKEN_SECRET),
             server_type=server_type,
             verify_ssl=self._config.get(CONF_VERIFY_SSL, False),
+            cert_fingerprint=self._config.get(CONF_CERT_FINGERPRINT),
+        )
+
+    # ===== CERTIFICATE PINNING ================================
+
+    async def _ensure_certificate(self, step_id, user_input):
+        """Ask the user to confirm the server certificate before sending credentials.
+
+        Returns the confirmation form, or None when verification is on or the
+        fingerprint for this host was already confirmed. If the certificate
+        cannot be read, None is returned without a fingerprint and the
+        client refuses to connect (CertificateNotPinned -> cannot_connect).
+        """
+        if self._config.get(CONF_VERIFY_SSL, False):
+            self._config.pop(CONF_CERT_FINGERPRINT, None)
+            return None
+        if normalize_fingerprint(self._config.get(CONF_CERT_FINGERPRINT)):
+            return None
+        platform = str(self._config.get(CONF_PLATFORM_TYPE) or "PVE").upper()
+        try:
+            fingerprint = await self.hass.async_add_executor_job(
+                fetch_certificate_fingerprint,
+                self._config[CONF_HOST],
+                DEFAULT_PORTS.get(platform, 8006),
+            )
+        except OSError as err:
+            _LOGGER.debug("Unable to read certificate of %s: %s", self._config[CONF_HOST], err)
+            return None
+        self._pending_certificate = (fingerprint, step_id, dict(user_input))
+        return await self.async_step_confirm_certificate()
+
+    async def async_step_confirm_certificate(self, user_input=None) -> FlowResult:
+        fingerprint, step_id, saved_input = self._pending_certificate
+        if user_input is not None:
+            if not user_input.get("confirm", False):
+                return self.async_abort(reason="certificate_rejected")
+            self._config[CONF_CERT_FINGERPRINT] = fingerprint
+            return await getattr(self, f"async_step_{step_id}")(saved_input)
+        return self.async_show_form(
+            step_id="confirm_certificate",
+            data_schema=vol.Schema({vol.Required("confirm", default=False): bool}),
+            description_placeholders={
+                "host": self._config[CONF_HOST],
+                "fingerprint": display_fingerprint(fingerprint),
+            },
+        )
+
+    # ===== REAUTH ============================================
+
+    async def async_step_reauth(self, entry_data) -> FlowResult:
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(self, user_input=None) -> FlowResult:
+        """Re-enter a rotated secret and/or review a changed pinned certificate."""
+        entry = self._get_reauth_entry()
+        data = dict(entry.data)
+        platform = _config_entry_platform(data)
+        secret_key = (
+            CONF_TOKEN_SECRET
+            if data.get(CONF_TOKEN_SECRET) or platform in ("PBS", "PDM")
+            else CONF_PASSWORD
+        )
+        errors = {}
+        stored = normalize_fingerprint(data.get(CONF_CERT_FINGERPRINT))
+        current = None
+        if not data.get(CONF_VERIFY_SSL, False):
+            try:
+                current = await self.hass.async_add_executor_job(
+                    fetch_certificate_fingerprint,
+                    data[CONF_HOST],
+                    DEFAULT_PORTS.get(platform, 8006),
+                )
+            except OSError:
+                errors["base"] = "cannot_connect"
+        changed = current is not None and current != stored
+
+        if user_input is not None and not errors:
+            if changed and not user_input.get("accept_certificate", False):
+                errors["base"] = "certificate_not_accepted"
+            else:
+                updates = {}
+                if user_input.get(secret_key):
+                    updates[secret_key] = user_input[secret_key]
+                if current is not None:
+                    updates[CONF_CERT_FINGERPRINT] = current
+                self._config = {**data, **updates}
+                client = self._build_client("PVE" if platform in ("PVE", "CLUSTER") else platform)
+                try:
+                    validation = await self._validate_connection(
+                        client, *_VALIDATION_ENDPOINTS.get(platform, _VALIDATION_ENDPOINTS["PVE"])
+                    )
+                except CertificateMismatchError:
+                    errors["base"] = "certificate_changed"
+                except AuthenticationError:
+                    errors["base"] = "invalid_auth"
+                except ProxmoxPermissionError:
+                    errors["base"] = "insufficient_permissions"
+                except (CannotConnect, CertificateNotPinned):
+                    errors["base"] = "cannot_connect"
+                except Exception:
+                    _LOGGER.exception("Unexpected error during reauthentication")
+                    errors["base"] = "unknown"
+                else:
+                    if not validation["has_minimum"]:
+                        errors["base"] = "insufficient_permissions"
+                    else:
+                        return self.async_update_reload_and_abort(entry, data_updates=updates)
+
+        schema = {vol.Optional(secret_key): _SECRET}
+        if changed:
+            schema[vol.Required("accept_certificate", default=False)] = bool
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=vol.Schema(schema),
+            errors=errors,
+            description_placeholders={
+                "title": entry.title,
+                "host": data[CONF_HOST],
+                "old_fingerprint": display_fingerprint(stored) if stored else "-",
+                "new_fingerprint": display_fingerprint(current) if current else "-",
+            },
         )
 
     async def _validate_connection(
@@ -597,15 +768,7 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def async_step_select_node(self, user_input=None) -> FlowResult:
 
-        client = ProxmoxClient(
-            host=self._config[CONF_HOST],
-            user=self._config[CONF_USER],
-            password=self._config.get(CONF_PASSWORD),
-            token_id=self._config.get(CONF_TOKEN_ID),
-            token_secret=self._config.get(CONF_TOKEN_SECRET),
-            server_type="PVE",
-            verify_ssl=self._config.get(CONF_VERIFY_SSL, False),
-        )
+        client = self._build_client("PVE")
 
         try:
             resources = await client.get_cluster_resources(self.hass)
@@ -692,15 +855,7 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
             return await self._finish()
 
-        client = ProxmoxClient(
-            host=self._config[CONF_HOST],
-            user=self._config[CONF_USER],
-            password=self._config.get(CONF_PASSWORD),
-            token_id=self._config.get(CONF_TOKEN_ID),
-            token_secret=self._config.get(CONF_TOKEN_SECRET),
-            server_type="PVE",
-            verify_ssl=self._config.get(CONF_VERIFY_SSL, False),
-        )
+        client = self._build_client("PVE")
 
         node = self._config[CONF_NODE]
 
@@ -926,15 +1081,7 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
 
             try:
-                client = ProxmoxClient(
-                    host=self._config[CONF_HOST],
-                    user=self._config[CONF_USER],
-                    password=self._config.get(CONF_PASSWORD),
-                    token_id=self._config.get(CONF_TOKEN_ID),
-                    token_secret=self._config.get(CONF_TOKEN_SECRET),
-                    server_type="PBS",
-                    verify_ssl=self._config.get(CONF_VERIFY_SSL, False),
-                )
+                client = self._build_client("PBS")
 
                 hostname = await client.get_pbs_hostname(self.hass)
 
@@ -963,15 +1110,7 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._config["server_id"] = f"cluster_{self._config[CONF_HOST]}"
 
             try:
-                client = ProxmoxClient(
-                    host=self._config[CONF_HOST],
-                    user=self._config[CONF_USER],
-                    password=self._config.get(CONF_PASSWORD),
-                    token_id=self._config.get(CONF_TOKEN_ID),
-                    token_secret=self._config.get(CONF_TOKEN_SECRET),
-                    server_type="PVE",
-                    verify_ssl=self._config.get(CONF_VERIFY_SSL, False),
-                )
+                client = self._build_client("PVE")
 
                 status = await client.get_cluster_status(self.hass)
                 cluster_name = status.get("name")

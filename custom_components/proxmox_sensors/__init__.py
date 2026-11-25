@@ -6,7 +6,12 @@ import asyncio
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryError, ConfigEntryNotReady
+from homeassistant.components import persistent_notification
+from homeassistant.exceptions import (
+    ConfigEntryAuthFailed,
+    ConfigEntryError,
+    ConfigEntryNotReady,
+)
 from homeassistant.const import Platform
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import device_registry as dr
@@ -26,9 +31,16 @@ from .const import (
     CONF_NODE,
     CONF_PLATFORM_TYPE,
     CONF_VERIFY_SSL,
+    CONF_CERT_FINGERPRINT,
 )
 
-from .api import ProxmoxClient
+from .api import AuthenticationError, ProxmoxClient
+from .tls import (
+    DEFAULT_PORTS,
+    display_fingerprint,
+    fetch_certificate_fingerprint,
+    normalize_fingerprint,
+)
 from .coordinator import (
     create_proxmox_coordinator, create_cluster_coordinator, create_pdm_coordinator,
     is_pbs_configuration_error, is_pbs_temporary_unavailable,
@@ -221,17 +233,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     _ensure_pbs_server_id(hass, entry)
 
+    client = await _async_build_client(hass, entry, entry.data[CONF_PLATFORM_TYPE])
     data = entry.data
-
-    client = ProxmoxClient(
-        host=data[CONF_HOST],
-        user=data[CONF_USER],
-        password=data.get(CONF_PASSWORD),
-        token_id=data.get(CONF_TOKEN_ID),
-        token_secret=data.get(CONF_TOKEN_SECRET),
-        server_type=data[CONF_PLATFORM_TYPE],
-        verify_ssl=data.get(CONF_VERIFY_SSL, False),
-    )
 
     coordinator = await create_proxmox_coordinator(hass, entry, client)
     if local_identity_context is not None:
@@ -285,6 +288,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         async with asyncio.timeout(20):
             await coordinator.async_config_entry_first_refresh()
     except Exception as err:
+        _raise_if_auth_failed(err, data[CONF_HOST])
         if data.get(CONF_PLATFORM_TYPE) == "PBS" and known_pbs and is_pbs_temporary_unavailable(err):
             _LOGGER.info("Known PBS %s is temporarily unavailable; loading existing entities", data[CONF_HOST])
         elif data.get(CONF_PLATFORM_TYPE) == "PBS" and is_pbs_configuration_error(err):
@@ -314,6 +318,70 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
+async def _async_build_client(hass: HomeAssistant, entry: ConfigEntry, server_type: str):
+    """Build the API client, pinning the certificate when verification is off.
+
+    Entries created before pinning existed have no fingerprint yet: the
+    certificate presented now is pinned (trust on first use) and the user is
+    told which fingerprint was recorded so they can compare it with Proxmox.
+    """
+    data = entry.data
+    verify_ssl = data.get(CONF_VERIFY_SSL, False)
+    fingerprint = normalize_fingerprint(data.get(CONF_CERT_FINGERPRINT))
+    if not verify_ssl and fingerprint is None:
+        platform = str(data.get(CONF_PLATFORM_TYPE) or server_type).upper()
+        try:
+            fingerprint = await hass.async_add_executor_job(
+                fetch_certificate_fingerprint, data[CONF_HOST], DEFAULT_PORTS.get(platform, 8006)
+            )
+        except OSError as err:
+            raise ConfigEntryNotReady(
+                f"Unable to read the certificate of {data[CONF_HOST]}: {err}"
+            ) from err
+        hass.config_entries.async_update_entry(
+            entry, data={**data, CONF_CERT_FINGERPRINT: fingerprint}
+        )
+        _LOGGER.warning(
+            "Pinned certificate SHA-256 %s for %s (%s)",
+            display_fingerprint(fingerprint), data[CONF_HOST], entry.title,
+        )
+        persistent_notification.async_create(
+            hass,
+            (
+                f"Certificate verification is off for **{entry.title}** "
+                f"({data[CONF_HOST]}), so its certificate is now pinned:\n\n"
+                f"`{display_fingerprint(fingerprint)}`\n\n"
+                "Compare it with the SHA-256 fingerprint shown in the Proxmox web "
+                "interface (Node \u2192 System \u2192 Certificates). If it differs, "
+                "remove this entry and investigate before adding it again."
+            ),
+            title="Proxmox certificate pinned",
+            notification_id=f"{DOMAIN}_cert_pinned_{entry.entry_id}",
+        )
+    return ProxmoxClient(
+        host=data[CONF_HOST],
+        user=data[CONF_USER],
+        password=data.get(CONF_PASSWORD),
+        token_id=data.get(CONF_TOKEN_ID),
+        token_secret=data.get(CONF_TOKEN_SECRET),
+        server_type=server_type,
+        verify_ssl=verify_ssl,
+        cert_fingerprint=fingerprint,
+    )
+
+
+def _raise_if_auth_failed(err: BaseException, host: str) -> None:
+    """Turn bad credentials or a changed certificate into a reauth prompt."""
+    seen = set()
+    while err is not None and id(err) not in seen:
+        seen.add(id(err))
+        if isinstance(err, ConfigEntryAuthFailed):
+            raise err
+        if isinstance(err, AuthenticationError):
+            raise ConfigEntryAuthFailed(f"Authentication failed for {host}: {err}") from err
+        err = err.__cause__ or err.__context__
+
+
 async def async_remove_config_entry_device(
     hass: HomeAssistant, config_entry: ConfigEntry, device_entry: dr.DeviceEntry
 ) -> bool:
@@ -329,19 +397,14 @@ async def _async_setup_pdm_entry(hass: HomeAssistant, entry: ConfigEntry) -> boo
         pdm_identity_scope(entry, hass.config_entries.async_entries(DOMAIN))
     except PDMIdentityError as err:
         raise ConfigEntryError(f"Invalid PDM identity: {err}") from err
-    client = ProxmoxClient(
-        host=data[CONF_HOST],
-        user=data[CONF_USER],
-        token_id=data.get(CONF_TOKEN_ID),
-        token_secret=data.get(CONF_TOKEN_SECRET),
-        server_type="PDM",
-        verify_ssl=data.get(CONF_VERIFY_SSL, False),
-    )
+    client = await _async_build_client(hass, entry, "PDM")
+    data = entry.data
     coordinator = await create_pdm_coordinator(hass, entry, client)
     try:
         async with asyncio.timeout(30):
             await coordinator.async_config_entry_first_refresh()
     except Exception as err:
+        _raise_if_auth_failed(err, data[CONF_HOST])
         if is_pbs_configuration_error(err):
             raise ConfigEntryError(
                 f"PDM authentication or permission error for {data[CONF_HOST]}"
@@ -367,15 +430,8 @@ async def _async_setup_cluster_entry(hass: HomeAssistant, entry: ConfigEntry) ->
 
     data = entry.data
 
-    client = ProxmoxClient(
-        host=data[CONF_HOST],
-        user=data[CONF_USER],
-        password=data.get(CONF_PASSWORD),
-        token_id=data.get(CONF_TOKEN_ID),
-        token_secret=data.get(CONF_TOKEN_SECRET),
-        server_type="PVE",  # uses PVE API
-        verify_ssl=data.get(CONF_VERIFY_SSL, False),
-    )
+    client = await _async_build_client(hass, entry, "PVE")  # CLUSTER uses the PVE API
+    data = entry.data
 
     coordinator = await create_cluster_coordinator(hass, entry, client)
 
@@ -383,6 +439,7 @@ async def _async_setup_cluster_entry(hass: HomeAssistant, entry: ConfigEntry) ->
         async with asyncio.timeout(20):
             await coordinator.async_config_entry_first_refresh()
     except Exception as err:
+        _raise_if_auth_failed(err, data[CONF_HOST])
         raise ConfigEntryNotReady(
             f"Unable to connect to Proxmox cluster {data[CONF_HOST]}"
         ) from err

@@ -4,7 +4,6 @@ from dataclasses import dataclass
 import re
 
 from .cluster_scope import (
-    ACTIVE_SCOPE,
     PENDING_SCOPE,
     pending_associated_cluster_for_pve,
     cluster_scope_status,

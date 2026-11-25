@@ -1,6 +1,16 @@
 {
   "config": {
     "step": {
+      "confirm_certificate": {
+        "title": "Confirm the server certificate",
+        "description": "Certificate verification is off, so this certificate will be pinned and every later connection must present exactly the same one.\n\nServer: **{host}**\nSHA-256 fingerprint:\n`{fingerprint}`\n\nCompare it with the fingerprint in the Proxmox web interface (Node → System → Certificates) before continuing. Your credentials are sent only after you confirm.",
+        "data": {"confirm": "The fingerprint matches my Proxmox server"}
+      },
+      "reauth_confirm": {
+        "title": "Reauthenticate {title}",
+        "description": "Home Assistant could not sign in to **{host}**, or its certificate changed.\n\nPinned fingerprint: `{old_fingerprint}`\nCurrent fingerprint: `{new_fingerprint}`\n\nEnter a new password or token secret if it changed (leave blank to keep the current one). If the fingerprint changed, confirm it in the Proxmox web interface (Node → System → Certificates) before accepting it.",
+        "data": {"password": "Password", "token_secret": "Token Secret", "accept_certificate": "Accept the new certificate fingerprint"}
+      },
       "user": {
         "title": "1. Server Connection",
         "description": "Enter your Proxmox server address. The port is managed automatically (8006 for PVE / 8007 for PBS / 8443 for PDM).",
@@ -115,6 +125,8 @@
       }
     },
     "error": {
+      "certificate_changed": "The server certificate changed while connecting. Start again and review the new fingerprint.",
+      "certificate_not_accepted": "The certificate changed. Confirm the new fingerprint to continue.",
       "recovery_unavailable": "The selected PVE group changed or its identity conflicts with the Registry. Choose again; no CLUSTER was created.",
       "cluster_unavailable": "The selected cluster is no longer available for joining. Go back or select another cluster.",
       "invalid_host": "Enter a valid hostname or IP address without a protocol, path, or port.",
@@ -125,6 +137,8 @@
       "unknown": "Unexpected error. Check Home Assistant logs."
     },
     "abort": {
+      "certificate_rejected": "Setup cancelled: the server certificate was not confirmed.",
+      "reauth_successful": "Reauthentication was successful.",
       "scope_unavailable": "Could not generate an unused CLUSTER association. Try again.",
       "already_configured": "This node is already configured.",
       "no_data": "No cluster data received. Check your configuration.",

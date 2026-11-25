@@ -1,8 +1,12 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Javisen/proxmox_sensors/main/img/logo_int.png" alt="Proxmox Extended Sensors Logo" width="600"/>
+  <img src="img/logo_int.png" alt="Proxmox Extended Sensors Logo" width="600"/>
 </p>
 
 > **Advanced Proxmox VE, PBS & PDM monitoring, control and dashboard integration for Home Assistant.**
+
+> [!NOTE]
+> This is **[darthrater78/proxmox_sensors](https://github.com/darthrater78/proxmox_sensors)**, a security-hardened fork of [Javisen/proxmox_sensors](https://github.com/Javisen/proxmox_sensors). It uses date versions (`YYYY.M.D`) and its own release pipeline.
+> **[Latest release notes](https://github.com/darthrater78/proxmox_sensors/releases/latest)** · [Changelog](CHANGELOG.md) · [Security architecture](#-security-architecture)
 
 # 🚀 Proxmox Extended Sensors
 
@@ -45,7 +49,8 @@
 - [Backup Services](#-backup-services-vms--cts)
 - [Supported Versions](#-supported-versions)
 - [Installation](#-installation)
-- [Development](https://proxmox-sensors.es/development/) 
+- [Security Architecture](#-security-architecture)
+- [Changelog](CHANGELOG.md)
 ---
 
 ## 🚀 Introduction
@@ -156,7 +161,7 @@ The integration does not overwrite a dashboard that you have taken control of.
 <summary><b>PVE</b></summary>
 
 <br>
-<img src="https://github.com/Javisen/proxmox_sensors/raw/refs/heads/main/img/Dashb_Node.png" alt="PVE dashboard" width="100%">
+<img src="img/Dashb_Node.png" alt="PVE dashboard" width="100%">
 
 </details>
 
@@ -164,7 +169,7 @@ The integration does not overwrite a dashboard that you have taken control of.
 <summary><b>PBS</b></summary>
 
 <br>
-<img src="https://github.com/Javisen/proxmox_sensors/raw/refs/heads/main/img/Dashb_PBS.png" alt="PBS dashboard" width="100%">
+<img src="img/Dashb_PBS.png" alt="PBS dashboard" width="100%">
 
 </details>
 
@@ -172,7 +177,7 @@ The integration does not overwrite a dashboard that you have taken control of.
 <summary><b>CLUSTER</b></summary>
 
 <br>
-<img src="https://github.com/Javisen/proxmox_sensors/raw/refs/heads/main/img/Dashb_Cluster.png" alt="CLUSTER dashboard" width="100%">
+<img src="img/Dashb_Cluster.png" alt="CLUSTER dashboard" width="100%">
 
 </details>
 
@@ -180,7 +185,7 @@ The integration does not overwrite a dashboard that you have taken control of.
 <summary><b>PDM</b></summary>
 
 <br>
-<img src="https://github.com/Javisen/proxmox_sensors/raw/refs/heads/main/img/Dashb_PDM.png" alt="PDM dashboard" width="100%">
+<img src="img/Dashb_PDM.png" alt="PDM dashboard" width="100%">
 
 </details>
 
@@ -427,18 +432,49 @@ The integration provides backup orchestration directly from Home Assistant.
 
 ### 🔹 Via HACS (Recommended)
 
-[![Open your Home Assistant instance and open Proxmox Extended Sensors in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=Javisen&repository=proxmox_sensors&category=integration)
+[![Open your Home Assistant instance and open this fork in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=darthrater78&repository=proxmox_sensors&category=integration)
 
-**Proxmox Extended Sensors is available in the default HACS repository — no custom repository is required.**
+This fork is installed as a **HACS custom repository**. It uses the same integration domain as the upstream project, so remove the upstream download first; the two cannot be installed side by side.
 
-1. Open **HACS → Integrations**.
-2. Search for **Proxmox Extended Sensors**.
+1. Open **HACS → ⋮ → Custom repositories**, add `https://github.com/darthrater78/proxmox_sensors` with type **Integration**.
+2. Search for **Proxmox Extended Sensors** and open the entry from `darthrater78/proxmox_sensors`.
 3. Click **Download**.
 4. Restart Home Assistant.
 5. Go to **Settings → Devices & Services → Add Integration**.
 6. Search for **Proxmox Extended Sensors** and configure your PVE, PBS, CLUSTER and/or PDM connection.
 
 > The optional Proxmox Dashboard is installed separately. See [Dynamic Proxmox Dashboard](#-dynamic-proxmox-dashboard).
+
+---
+
+## 🔐 Security Architecture
+
+How this fork is built, and later changed, with regard to security. Every security fix updates this section.
+
+**Components and trust boundaries**
+
+- **Integration (Home Assistant).** Talks to the Proxmox VE / PBS / PDM HTTPS APIs with the credentials you enter. Home Assistant stores config-entry credentials in its own `.storage` directory; protect that directory and your Home Assistant backups like any other secret store.
+- **Sidecar (`pve-sensors-api.py`, optional).** A small HTTP service on each PVE node, port 9000, that exposes read-only hardware data (lm-sensors, SMART, memory modules, mounts, KSM). It runs as root because SMART and DMI reads need raw device access. It accepts requests only from the IP addresses listed in `/etc/proxmox-sensors/sidecar.conf`. Every endpoint is a fixed command with no client-controlled arguments, except `/smart-disk`, which accepts only an existing block device under `/dev`.
+
+**Transport security (Proxmox APIs)**
+
+- With **Verify SSL Certificate** on, certificates are checked against the system trust store (use this with ACME / Let's Encrypt certificates).
+- With it off (Proxmox's own self-signed certificates), the server certificate's **SHA-256 fingerprint is pinned**. During setup the fingerprint is shown for you to compare with the Proxmox web interface (Node → System → Certificates), and your password or token is sent only after you confirm. Every later request, including the password login itself, is refused unless the server presents that exact certificate. TLS 1.2 is the minimum.
+- Entries created before pinning existed pin the certificate they see on their next start and show a notification with the fingerprint to check.
+- If the certificate changes, or the password/token stops working, Home Assistant opens a **reauthentication** prompt that shows the old and new fingerprints; nothing is sent to the server until you accept.
+
+**Actions and services**
+
+- Node reboot and shutdown are **opt-in** (`enable_node_controls`, off unless you turn it on), for both the buttons and the `confirm_shutdown_node` / `confirm_reboot_node` services.
+- Every domain service that changes something (`create_vzdump_backup`, `backup_all`, `confirm_shutdown_node`, `confirm_reboot_node`, `wake_node`) requires a Home Assistant **administrator**, and validates its input (backup mode and compression from fixed lists, bounded concurrency and delays, strict MAC address format).
+
+**Supply chain**
+
+- Every GitHub Action is pinned to a commit SHA (except `hacs/action`, which HACS requires unpinned); Dependabot keeps pins and Python dependencies current, and CodeQL, dependency review and a weekly `pip-audit` watch for vulnerabilities.
+- Each release attaches the sidecar and its installer with a `SHA256SUMS` file and a signed build-provenance attestation. Check a download with `gh attestation verify pve-sensors-api.py --repo darthrater78/proxmox_sensors`.
+- Releases are published only from tags on `main` whose commit passed CI and whose `manifest.json` version matches the tag.
+
+**Known gaps being worked on** (from the 2026-11-25 audit): the sidecar has no authentication beyond its IP allowlist and no request timeouts, runs with a broad systemd sandbox, and its installer downloads from `main` without a checksum. See [CHANGELOG.md](CHANGELOG.md) as each is closed.
 
 ---
 
@@ -462,4 +498,4 @@ Please use the GitHub issue tracker for reproducible problems and include releva
 
 MIT License
 
-Copyright (c) Javisen
+Copyright (c) Javisen. Fork changes copyright (c) darthrater78, under the same license.

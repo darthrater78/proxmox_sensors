@@ -4,6 +4,7 @@ import logging
 import asyncio
 import requests
 from datetime import timedelta, datetime, timezone
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import DOMAIN, CONF_NODE, CONF_PLATFORM_TYPE
@@ -31,6 +32,33 @@ from .logic.physical_disks import (
 from .logic.physical_disk_type import apply_inventory_types
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _guard_certificate(client, update_method):
+    """Fail the update with ConfigEntryAuthFailed after a pinned-certificate mismatch.
+
+    Most API reads swallow errors so one failing endpoint does not take the
+    whole entry down; a changed certificate must not be swallowed, because
+    the right response is to stop and ask the user (the reauth flow).
+    """
+    def _check():
+        if getattr(client, "certificate_mismatch", False):
+            raise ConfigEntryAuthFailed(
+                "The Proxmox server certificate changed and no longer matches "
+                "the pinned fingerprint"
+            )
+
+    async def guarded():
+        _check()
+        try:
+            data = await update_method()
+        except UpdateFailed:
+            _check()
+            raise
+        _check()
+        return data
+
+    return guarded
 
 
 def is_pbs_temporary_unavailable(error):
@@ -63,11 +91,6 @@ def _normalize_api_dict(payload):
             return nested
         return payload
     return {}
-
-
-async def limited_task_func(func, *args):
-    async with SEM:
-        return await func(*args)
 
 
 def _log_cluster_fetch_error(field: str, err: Exception) -> None:
@@ -1235,7 +1258,7 @@ async def create_proxmox_coordinator(hass, entry, client):
         hass,
         _LOGGER,
         name=f"proxmox_{server_type.lower()}_{node}",
-        update_method=async_update_data,
+        update_method=_guard_certificate(client, async_update_data),
         update_interval=timedelta(seconds=60),
     )
 
@@ -1438,7 +1461,7 @@ async def create_cluster_coordinator(hass, entry, client):
         hass,
         _LOGGER,
         name=f"proxmox_cluster_{entry.data.get('cluster_name', 'unknown')}",
-        update_method=async_update_cluster,
+        update_method=_guard_certificate(client, async_update_cluster),
         update_interval=timedelta(seconds=60),
     )
 
@@ -1516,7 +1539,7 @@ async def create_pdm_coordinator(hass, entry, client):
         hass,
         _LOGGER,
         name=f"proxmox_pdm_{entry.entry_id}",
-        update_method=async_update_pdm,
+        update_method=_guard_certificate(client, async_update_pdm),
         update_interval=timedelta(seconds=60),
     )
     coordinator.client = client

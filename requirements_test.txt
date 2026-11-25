@@ -1,0 +1,7 @@
+# Test and lint toolchain. Exact pins; Dependabot (pip) keeps them current.
+# pytest-homeassistant-custom-component pins the matching homeassistant release.
+pytest-homeassistant-custom-component==0.13.375
+ruff==0.17.6
+# Runtime requirement from manifest.json, pinned here so tests and the weekly
+# audit run against a known version.
+proxmoxer==2.3.0

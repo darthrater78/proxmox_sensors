@@ -2,9 +2,15 @@
 
 import logging
 import asyncio
+import re
 import time
+import voluptuous as vol
+
 from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.exceptions import ServiceValidationError
+import homeassistant.helpers.config_validation as cv
+from homeassistant.helpers.service import async_register_admin_service
 
 from .const import DOMAIN
 
@@ -62,6 +68,71 @@ def _backup_scheduler(max_concurrent, delay_between):
             condition.notify_all()
 
     return acquire, release
+
+
+_MODES = ("snapshot", "suspend", "stop")
+_COMPRESS = ("zstd", "gzip", "lzo", "none", "0", "1")
+_MAC = re.compile(r"[0-9A-Fa-f]{2}([:-]?)[0-9A-Fa-f]{2}(?:\1[0-9A-Fa-f]{2}){4}\Z")
+
+_TARGET = {
+    vol.Optional("entry_id"): cv.string,
+    vol.Required("node"): cv.string,
+}
+_GUESTS = vol.Any(
+    vol.All(vol.Coerce(int), vol.Range(min=1)),
+    cv.string,
+    [vol.All(vol.Coerce(int), vol.Range(min=1))],
+)
+_BACKUP_COMMON = {
+    **_TARGET,
+    vol.Required("storage"): cv.string,
+    vol.Optional("mode", default="snapshot"): vol.In(_MODES),
+    vol.Optional("compress", default="zstd"): vol.In(_COMPRESS),
+    vol.Optional("max_concurrent", default=1): vol.All(
+        vol.Coerce(int), vol.Range(min=1, max=10)
+    ),
+}
+
+CREATE_VZDUMP_BACKUP_SCHEMA = vol.Schema({
+    **_BACKUP_COMMON,
+    vol.Optional("guests"): _GUESTS,
+    vol.Optional("vmid"): _GUESTS,  # legacy alias of guests
+    vol.Optional("delay_between", default=0): vol.All(
+        vol.Coerce(float), vol.Range(min=0, max=300)
+    ),
+})
+BACKUP_ALL_SCHEMA = vol.Schema({
+    **_BACKUP_COMMON,
+    vol.Optional("delay_between", default=30): vol.All(
+        vol.Coerce(float), vol.Range(min=0, max=300)
+    ),
+    vol.Optional("include_vms", default=False): cv.boolean,
+    vol.Optional("include_cts", default=False): cv.boolean,
+})
+NODE_POWER_SCHEMA = vol.Schema({
+    **_TARGET,
+    vol.Optional("confirm", default=False): cv.boolean,
+})
+WAKE_NODE_SCHEMA = vol.Schema({
+    vol.Optional("entry_id"): cv.string,
+    vol.Optional("node"): cv.string,
+    vol.Optional("mac"): vol.All(cv.string, vol.Match(_MAC)),
+})
+
+
+def node_controls_enabled(entry) -> bool:
+    """Node reboot/shutdown is opt-in: a missing setting means disabled."""
+    return bool(entry.options.get(
+        "enable_node_controls", entry.data.get("enable_node_controls", False)
+    ))
+
+
+def _require_node_controls(entry, node):
+    if not node_controls_enabled(entry):
+        raise ServiceValidationError(
+            f"Node controls are disabled for {node}. Enable them in the "
+            "integration options to allow reboot and shutdown."
+        )
 
 
 def _resolve_pve_target(hass, data, *, allow_auto=False):
@@ -175,8 +246,9 @@ def register_services(hass: HomeAssistant, entry=None):
         )
         return detailed_results
 
-    hass.services.async_register(
-        DOMAIN, "create_vzdump_backup", handle_create_vzdump_backup
+    async_register_admin_service(
+        hass, DOMAIN, "create_vzdump_backup", handle_create_vzdump_backup,
+        schema=CREATE_VZDUMP_BACKUP_SCHEMA,
     )
 
     # =======MASSIVE BACKUP=========
@@ -333,12 +405,16 @@ def register_services(hass: HomeAssistant, entry=None):
 
         return detailed_results
 
-    hass.services.async_register(DOMAIN, "backup_all", handle_backup_all)
+    async_register_admin_service(
+        hass, DOMAIN, "backup_all", handle_backup_all,
+        schema=BACKUP_ALL_SCHEMA,
+    )
 
     # ========SHUTDOWN NODE===========
 
     async def handle_confirm_shutdown(call: ServiceCall):
         selected, entry_data, node = _resolve_pve_target(hass, call.data)
+        _require_node_controls(selected, node)
         confirm = call.data.get("confirm", False)
 
         if not confirm:
@@ -363,14 +439,16 @@ def register_services(hass: HomeAssistant, entry=None):
         except Exception as e:
             _LOGGER.error(f"Error shutting down node {node}: {e}")
 
-    hass.services.async_register(
-        DOMAIN, "confirm_shutdown_node", handle_confirm_shutdown
+    async_register_admin_service(
+        hass, DOMAIN, "confirm_shutdown_node", handle_confirm_shutdown,
+        schema=NODE_POWER_SCHEMA,
     )
 
     # =======REBOOT NODE==========
 
     async def handle_confirm_reboot(call: ServiceCall):
         selected, entry_data, node = _resolve_pve_target(hass, call.data)
+        _require_node_controls(selected, node)
         confirm = call.data.get("confirm", False)
 
         if not confirm:
@@ -393,7 +471,10 @@ def register_services(hass: HomeAssistant, entry=None):
         except Exception as e:
             _LOGGER.error(f"Error rebooting node {node}: {e}")
 
-    hass.services.async_register(DOMAIN, "confirm_reboot_node", handle_confirm_reboot)
+    async_register_admin_service(
+        hass, DOMAIN, "confirm_reboot_node", handle_confirm_reboot,
+        schema=NODE_POWER_SCHEMA,
+    )
 
     # ======= WAKE NODE (WOL) ==========
 
@@ -406,9 +487,8 @@ def register_services(hass: HomeAssistant, entry=None):
         if not mac:
             raise ValueError("MAC address is required for WOL")
 
-        mac_clean = mac.replace(":", "").replace("-", "")
-        if len(mac_clean) != 12:
-            raise ValueError(f"Invalid MAC address format: {mac}")
+        if not isinstance(mac, str) or not _MAC.fullmatch(mac):
+            raise ServiceValidationError(f"Invalid MAC address format: {mac}")
 
         try:
             _LOGGER.info(f"Sending WOL packet to node {node} ({mac})")
@@ -425,4 +505,7 @@ def register_services(hass: HomeAssistant, entry=None):
         except Exception as e:
             _LOGGER.error(f"Error sending WOL to node {node}: {e}")
 
-    hass.services.async_register(DOMAIN, "wake_node", handle_wake_node)
+    async_register_admin_service(
+        hass, DOMAIN, "wake_node", handle_wake_node,
+        schema=WAKE_NODE_SCHEMA,
+    )

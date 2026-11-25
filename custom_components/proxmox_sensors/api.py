@@ -7,6 +7,10 @@ import requests
 import time
 from urllib.parse import urlencode
 from proxmoxer import ProxmoxAPI
+from proxmoxer.backends.https import ProxmoxHTTPAuth, ProxmoxHTTPAuthBase
+from proxmoxer.core import AuthenticationError as ProxmoxerAuthenticationError
+
+from .tls import CertificateNotPinned, is_fingerprint_mismatch, pin_session
 
 LOGGER = logging.getLogger(__name__)
 
@@ -17,6 +21,54 @@ class AuthenticationError(Exception):
 
 class CannotConnect(Exception):
     """Raised when the API cannot be reached."""
+
+
+class CertificateMismatchError(AuthenticationError):
+    """The server no longer presents the pinned certificate.
+
+    Subclasses AuthenticationError so setup raises ConfigEntryAuthFailed and
+    Home Assistant offers the reauth flow, where the new certificate can be
+    reviewed and accepted.
+    """
+
+
+class _PinnedPasswordAuth(ProxmoxHTTPAuth):
+    """proxmoxer password auth whose ticket requests go through a pinned session.
+
+    proxmoxer's own ProxmoxHTTPAuth posts the password with a bare
+    requests.post(), which no session adapter can pin, so the ticket request
+    is reimplemented here on a session supplied by ProxmoxClient.
+    """
+
+    def __init__(self, username, password, base_url, session_factory, timeout):
+        ProxmoxHTTPAuthBase.__init__(self, timeout=timeout, service="PVE", verify_ssl=False)
+        self.base_url = base_url
+        self.username = username
+        self.pve_auth_ticket = ""
+        self._session_factory = session_factory
+        self._get_new_tokens(password=password)
+
+    def _get_new_tokens(self, password=None, otp=None, otptype=None):
+        if password is None:
+            password = self.pve_auth_ticket
+        with self._session_factory() as session:
+            response = session.post(
+                self.base_url + "/access/ticket",
+                data={"username": self.username, "password": password},
+                timeout=self.timeout,
+            )
+        if response.status_code != 200:
+            raise ProxmoxerAuthenticationError(
+                f"Couldn't authenticate user: {self.username} code: {response.status_code}"
+            )
+        data = response.json()["data"]
+        if data.get("NeedTFA") is not None:
+            raise ProxmoxerAuthenticationError(
+                "Two-factor authentication is not supported; use an API token"
+            )
+        self.birth_time = time.monotonic()
+        self.pve_auth_ticket = data["ticket"]
+        self.csrf_prevention_token = data["CSRFPreventionToken"]
 
 
 class PermissionError(Exception):
@@ -59,6 +111,7 @@ class ProxmoxClient:
         server_type: str = "PVE",
         port: Optional[int] = None,
         verify_ssl: bool = True,
+        cert_fingerprint: Optional[str] = None,
     ):
         self._host = host
         self._user = user
@@ -68,7 +121,34 @@ class ProxmoxClient:
         self._server_type = server_type
         self._port = port
         self._verify_ssl = verify_ssl
+        self._cert_fingerprint = cert_fingerprint
         self._proxmox: Optional[ProxmoxAPI] = None
+        self._build_error: Exception | None = None
+        # Set once a pinned certificate mismatch is seen; the coordinators turn
+        # it into ConfigEntryAuthFailed so the user is asked to review it.
+        self.certificate_mismatch = False
+
+    def _new_session(self) -> requests.Session:
+        """A requests session that verifies TLS one way or the other, never neither."""
+        session = requests.Session()
+        if self._verify_ssl:
+            session.verify = True
+            return session
+        if not self._cert_fingerprint:
+            session.close()
+            raise CertificateNotPinned(
+                f"Certificate verification is off for {self._host} and no "
+                "certificate fingerprint has been confirmed"
+            )
+        return pin_session(session, self._cert_fingerprint)
+
+    def _tls_error(self, err: BaseException) -> CertificateMismatchError | None:
+        if not is_fingerprint_mismatch(err):
+            return None
+        self.certificate_mismatch = True
+        return CertificateMismatchError(
+            f"The certificate presented by {self._host} does not match the pinned fingerprint"
+        )
 
     def _build_client_sync(self):
         if self._server_type in ("PBS", "PDM"):
@@ -76,10 +156,17 @@ class ProxmoxClient:
 
         port = self._port or 8006
         timeout_val = 30
+        pinned = not self._verify_ssl
+        self._build_error = None
 
         try:
+            if pinned and not self._cert_fingerprint:
+                raise CertificateNotPinned(
+                    f"Refusing to connect to {self._host}: certificate verification "
+                    "is off and no certificate fingerprint has been confirmed"
+                )
             if self._token_id and self._token_secret:
-                self._proxmox = ProxmoxAPI(
+                api = ProxmoxAPI(
                     self._host,
                     user=self._user,
                     token_name=self._token_id,
@@ -88,18 +175,44 @@ class ProxmoxClient:
                     port=port,
                     timeout=timeout_val,
                 )
-            else:
-                self._proxmox = ProxmoxAPI(
+            elif pinned:
+                # Token auth makes no request at construction; the placeholder
+                # is replaced with pinned password auth before any request.
+                api = ProxmoxAPI(
                     self._host,
                     user=self._user,
-                    password=self._password,
-                    verify_ssl=self._verify_ssl,
+                    token_name="pinned-login-placeholder",
+                    token_value="unused",
+                    verify_ssl=False,
                     port=port,
                     timeout=timeout_val,
                 )
+                auth = _PinnedPasswordAuth(
+                    self._user,
+                    self._password,
+                    base_url=api._store["base_url"],
+                    session_factory=self._new_session,
+                    timeout=timeout_val,
+                )
+                api._backend.auth = auth
+                api._store["session"].auth = auth
+            else:
+                api = ProxmoxAPI(
+                    self._host,
+                    user=self._user,
+                    password=self._password,
+                    verify_ssl=True,
+                    port=port,
+                    timeout=timeout_val,
+                )
+            if pinned:
+                pin_session(api._store["session"], self._cert_fingerprint)
+            self._proxmox = api
         except Exception as err:
+            self._build_error = self._tls_error(err) or err
             LOGGER.error(
-                "Failed to initialize Proxmoxer client on %s: %s", self._host, err
+                "Failed to initialize Proxmoxer client on %s: %s",
+                self._host, self._build_error,
             )
             self._proxmox = None
 
@@ -125,13 +238,18 @@ class ProxmoxClient:
         proxmox = await self.get_api_client(hass)
         if proxmox is None:
             if raise_errors:
-                raise CannotConnect(f"Unable to initialize client for {path}")
+                self._raise_build_error(path)
             return None
 
         try:
             return await hass.async_add_executor_job(proxmox.get, path)
 
         except Exception as err:
+            if mismatch := self._tls_error(err):
+                if raise_errors:
+                    raise mismatch from err
+                LOGGER.error("%s", mismatch)
+                return None
             if raise_errors:
                 status_code = _extract_status_code(err)
                 if status_code is not None:
@@ -168,6 +286,15 @@ class ProxmoxClient:
             LOGGER.error("PVE GET error on %s: %s", path, err)
             return None
 
+    def _raise_build_error(self, path: str) -> None:
+        err = self._build_error
+        if isinstance(err, (CertificateMismatchError, CertificateNotPinned)):
+            raise err
+        status_code = _extract_status_code(err) if err is not None else None
+        if status_code is not None:
+            _raise_for_auth_or_permission(status_code, path)
+        raise CannotConnect(f"Unable to initialize client for {path}") from err
+
     async def post(self, hass, path: str, data=None) -> Any:
         if self._server_type == "PDM":
             return None
@@ -181,7 +308,7 @@ class ProxmoxClient:
         try:
             return await hass.async_add_executor_job(_do_post)
         except Exception as err:
-            LOGGER.error("PVE POST error on %s: %s", path, err)
+            LOGGER.error("PVE POST error on %s: %s", path, self._tls_error(err) or err)
             return None
 
     async def get_cluster_resources(self, hass, raise_errors: bool = False):
@@ -655,9 +782,8 @@ class ProxmoxClient:
             "Accept": "application/json",
         }
         try:
-            response = requests.get(
-                url, headers=headers, verify=self._verify_ssl, timeout=15
-            )
+            with self._new_session() as session:
+                response = session.get(url, headers=headers, timeout=15)
             if response.status_code >= 400:
                 if raise_errors:
                     _raise_for_auth_or_permission(response.status_code, path)
@@ -669,9 +795,18 @@ class ProxmoxClient:
             if not isinstance(payload, dict) or "data" not in payload:
                 raise ValueError("Invalid PDM API response envelope")
             return payload["data"]
+        except CertificateNotPinned as err:
+            if raise_errors:
+                raise
+            LOGGER.error("%s", err)
+            return None
         except (AuthenticationError, PermissionError, CannotConnect):
             raise
         except requests.exceptions.RequestException as err:
+            if mismatch := self._tls_error(err):
+                if raise_errors:
+                    raise mismatch from err
+                return None
             if raise_errors:
                 raise CannotConnect(f"PDM request failed for {path}") from err
             return None
@@ -755,18 +890,11 @@ class ProxmoxClient:
         headers = {"Authorization": auth_header, "Accept": "application/json"}
 
         try:
-            if method == "GET":
-                r = requests.get(
-                    url, headers=headers, verify=self._verify_ssl, timeout=15
-                )
-            else:
-                r = requests.post(
-                    url,
-                    headers=headers,
-                    json=(data or {}),
-                    verify=self._verify_ssl,
-                    timeout=15,
-                )
+            with self._new_session() as session:
+                if method == "GET":
+                    r = session.get(url, headers=headers, timeout=15)
+                else:
+                    r = session.post(url, headers=headers, json=(data or {}), timeout=15)
 
             if method == "GET" and path == "nodes/localhost/identity" and r.status_code == 404:
                 LOGGER.debug("PBS instance identity endpoint unavailable on %s", clean_host)
@@ -787,9 +915,19 @@ class ProxmoxClient:
 
             return r.json().get("data")
 
+        except CertificateNotPinned as err:
+            if raise_errors:
+                raise
+            LOGGER.error("%s", err)
+            return None
         except (AuthenticationError, PermissionError, CannotConnect):
             raise
         except requests.exceptions.RequestException as err:
+            if mismatch := self._tls_error(err):
+                if raise_errors:
+                    raise mismatch from err
+                LOGGER.error("%s", mismatch)
+                return None
             if raise_errors:
                 raise CannotConnect(f"PBS request failed for {path}") from err
             return None
