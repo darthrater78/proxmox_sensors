@@ -92,6 +92,7 @@ async def test_reauth_accepts_new_certificate_and_secret(hass):
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], {"token_secret": "new", "accept_certificate": True}
         )
+        await hass.async_block_till_done()
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "reauth_successful"
     assert entry.data["cert_fingerprint"] == FP_NEW

@@ -31,6 +31,14 @@ from .logic.cluster_scope import (
     cluster_scope_status, entry_cluster_scope_id, new_cluster_scope_id,
 )
 from .logic.cluster_scope import associated_cluster_for_pve
+from .logic.entry_options import (
+    CLUSTER_SENSOR_GROUPS,
+    EXCLUDED_DATASTORES,
+    PVE_SENSOR_GROUPS,
+    entry_option,
+    excluded_pbs_datastores,
+)
+from .services import _MAC
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -218,61 +226,86 @@ class ProxmoxOptionsFlow(config_entries.OptionsFlow):
     async def async_step_cluster(self, user_input=None) -> FlowResult:
 
         conf = self.config_entry.data
+        is_cluster = conf.get(CONF_PLATFORM_TYPE) == "CLUSTER"
+        groups = CLUSTER_SENSOR_GROUPS if is_cluster else ()
 
         if user_input is not None:
             new_data = dict(conf)
             new_data[CONF_VERIFY_SSL] = user_input.get(CONF_VERIFY_SSL, False)
+            # Keep every existing option; only the fields on this form change.
+            new_options = dict(self.config_entry.options or {})
+            for key in groups:
+                new_options[key] = bool(user_input.get(key, True))
             self.hass.config_entries.async_update_entry(
-                self.config_entry, data=new_data, options={}
+                self.config_entry, data=new_data, options=new_options
             )
             await self.hass.config_entries.async_reload(self.config_entry.entry_id)
-            return self.async_create_entry(title="", data={})
+            return self.async_create_entry(title="", data=new_options)
 
-        return self.async_show_form(
-            step_id="init",
-            data_schema=vol.Schema(
-                {
-                    vol.Optional(
-                        CONF_VERIFY_SSL, default=conf.get(CONF_VERIFY_SSL, False)
-                    ): bool,
-                }
-            ),
-        )
+        schema = {
+            vol.Optional(key, default=bool(entry_option(self.config_entry, key, True))): bool
+            for key in groups
+        }
+        schema[vol.Optional(CONF_VERIFY_SSL, default=conf.get(CONF_VERIFY_SSL, False))] = bool
+        return self.async_show_form(step_id="init", data_schema=vol.Schema(schema))
 
     # ===== PBS OPTIONS =======================================
 
     async def async_step_pbs(self, user_input=None) -> FlowResult:
 
         conf = self.config_entry.data
+        datastores = self._pbs_datastores()
+        excluded = excluded_pbs_datastores(self.config_entry)
+        schema = {}
+        if datastores:
+            schema[vol.Optional(
+                "datastores", default=[store for store in datastores if store not in excluded]
+            )] = cv.multi_select({store: store for store in datastores})
+        schema.update({
+            vol.Optional(
+                "enable_pbs_node_controls",
+                default=bool(entry_option(self.config_entry, "enable_pbs_node_controls", True)),
+            ): bool,
+            vol.Optional("wol_mac", default=conf.get("wol_mac", "")): str,
+            vol.Optional(CONF_VERIFY_SSL, default=conf.get(CONF_VERIFY_SSL, False)): bool,
+        })
+        errors = {}
 
         if user_input is not None:
-            new_data = dict(conf)
-            new_data[CONF_VERIFY_SSL] = user_input.get(CONF_VERIFY_SSL, False)
-            new_data["enable_pbs_node_controls"] = user_input.get(
-                "enable_pbs_node_controls", True
-            )
-            new_data["wol_mac"] = user_input.get("wol_mac", "")
-            self.hass.config_entries.async_update_entry(
-                self.config_entry, data=new_data, options={}
-            )
-            await self.hass.config_entries.async_reload(self.config_entry.entry_id)
-            return self.async_create_entry(title="", data={})
+            mac = (user_input.get("wol_mac") or "").strip()
+            if mac and not _MAC.fullmatch(mac):
+                errors["wol_mac"] = "invalid_mac"
+            else:
+                new_data = dict(conf)
+                new_data[CONF_VERIFY_SSL] = user_input.get(CONF_VERIFY_SSL, False)
+                new_data["wol_mac"] = mac
+                # Keep every existing option (e.g. PBS job mappings).
+                new_options = dict(self.config_entry.options or {})
+                new_options["enable_pbs_node_controls"] = bool(
+                    user_input.get("enable_pbs_node_controls", True)
+                )
+                if datastores:
+                    chosen = set(user_input.get("datastores", datastores))
+                    # Store what was switched off, so new datastores still appear.
+                    new_options[EXCLUDED_DATASTORES] = sorted(
+                        (set(datastores) - chosen) | (excluded - set(datastores))
+                    )
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry, data=new_data, options=new_options
+                )
+                await self.hass.config_entries.async_reload(self.config_entry.entry_id)
+                return self.async_create_entry(title="", data=new_options)
 
         return self.async_show_form(
-            step_id="init",
-            data_schema=vol.Schema(
-                {
-                    vol.Optional(
-                        CONF_VERIFY_SSL, default=conf.get(CONF_VERIFY_SSL, False)
-                    ): bool,
-                    vol.Optional(
-                        "enable_pbs_node_controls",
-                        default=conf.get("enable_pbs_node_controls", True),
-                    ): bool,
-                    vol.Optional("wol_mac", default=conf.get("wol_mac", "")): str,
-                }
-            ),
+            step_id="init", data_schema=vol.Schema(schema), errors=errors
         )
+
+    def _pbs_datastores(self):
+        """Datastores the running coordinator has seen, sorted; empty if unknown."""
+        runtime = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
+        data = getattr(runtime.get("coordinator"), "data", None) or {}
+        stores = data.get("pbs_datastores") or {}
+        return sorted(str(store) for store in stores)
 
     async def _guest_inventory(self, client):
         """Validate cluster inventory against fresh lists from every visible node."""
@@ -301,9 +334,18 @@ class ProxmoxOptionsFlow(config_entries.OptionsFlow):
                 raise GuestSelectionError("guest_discovery_unavailable")
         choices = {"vms": {}, "cts": {}}
         locations = {"vms": {}, "cts": {}}
+        online = {r.get("node") for r in resources
+                  if r.get("type") == "node" and r.get("status") == "online"}
         for node in sorted(nodes):
             for field, resource_type, endpoint in (("vms", "qemu", "qemu"), ("cts", "lxc", "lxc")):
-                guests = await client.get(self.hass, f"nodes/{node}/{endpoint}", raise_errors=True)
+                if node not in online:
+                    # An offline node cannot list its guests; the cluster
+                    # inventory still knows them, so use it instead of
+                    # failing the whole guest selection.
+                    guests = [r for r in resources
+                              if r.get("type") == resource_type and r.get("node") == node]
+                else:
+                    guests = await client.get(self.hass, f"nodes/{node}/{endpoint}", raise_errors=True)
                 if not isinstance(guests, list) or any(
                     not isinstance(g, dict) or not str(g.get("vmid", "")).isdecimal() for g in guests
                 ):
@@ -338,6 +380,12 @@ class ProxmoxOptionsFlow(config_entries.OptionsFlow):
                        if isinstance(g, dict) and str(g.get("vmid", "")).isdecimal())
         return ids
 
+    def _sensor_group_fields(self):
+        return {
+            vol.Optional(key, default=bool(entry_option(self.config_entry, key, True))): bool
+            for key in PVE_SENSOR_GROUPS
+        }
+
     # ===== PVE OPTIONS =======================================
 
     async def async_step_pve(self, user_input=None) -> FlowResult:
@@ -367,6 +415,12 @@ class ProxmoxOptionsFlow(config_entries.OptionsFlow):
             if action == "independent" and action in self._scope_choices():
                 self._pending_scope_action = action
                 return await self.async_step_scope_confirm()
+            mac = (user_input.get("wol_mac") or "").strip()
+            if mac and not _MAC.fullmatch(mac):
+                return self.async_show_form(step_id="init", data_schema=self._pve_schema,
+                                            errors={"wol_mac": "invalid_mac"})
+            if "wol_mac" in user_input:
+                user_input = {**user_input, "wol_mac": mac}
             plans = {}
             changed_fields = [field for field in ("vms", "cts") if field in user_input
                               and set(user_input[field]) != set(getattr(self, "_guest_defaults", {}).get(field, []))]
@@ -416,14 +470,16 @@ class ProxmoxOptionsFlow(config_entries.OptionsFlow):
             new_data = dict(self.config_entry.data)
             options = self.config_entry.options or {}
             wol_mac_map = options.get("wol_macs", {})
-            for key in (CONF_VERIFY_SSL, "enable_lm_sensors", "enable_physical_disks",
-                        "enable_smart_monitoring", "enable_node_controls",
+            new_options = dict(options)
+            for key in (CONF_VERIFY_SSL, *PVE_SENSOR_GROUPS, "enable_node_controls",
                         "enable_guest_agent_metrics"):
                 if key in user_input:
                     new_data[key] = user_input[key]
+                    # Options take precedence over data, so a stale option
+                    # would silently override what the user just chose.
+                    new_options.pop(key, None)
             if "storage" in user_input:
                 new_data["selected_storage"] = user_input["storage"]
-            new_options = dict(options)
             if "smart_refresh_interval" in user_input:
                 new_options["smart_refresh_interval"] = user_input["smart_refresh_interval"]
             wol_macs = dict(wol_mac_map)
@@ -536,18 +592,7 @@ class ProxmoxOptionsFlow(config_entries.OptionsFlow):
                         vol.Optional(
                             "storage", default=selected_storage
                         ): cv.multi_select(st_options),
-                        vol.Optional(
-                            "enable_physical_disks",
-                            default=conf.get("enable_physical_disks", True),
-                        ): bool,
-                        vol.Optional(
-                            "enable_lm_sensors",
-                            default=conf.get("enable_lm_sensors", True),
-                        ): bool,
-                        vol.Optional(
-                            "enable_smart_monitoring",
-                            default=conf.get("enable_smart_monitoring", True),
-                        ): bool,
+                        **self._sensor_group_fields(),
                         vol.Optional(
                             "smart_refresh_interval",
                             default=options.get("smart_refresh_interval", conf.get("smart_refresh_interval", 1)),
@@ -578,18 +623,7 @@ class ProxmoxOptionsFlow(config_entries.OptionsFlow):
             self._guest_choices = None
             schema_fields = {
                         vol.Optional("wol_mac", default=wol_mac_map.get(current_node, "")): str,
-                        vol.Optional(
-                            "enable_physical_disks",
-                            default=conf.get("enable_physical_disks", True),
-                        ): bool,
-                        vol.Optional(
-                            "enable_lm_sensors",
-                            default=conf.get("enable_lm_sensors", True),
-                        ): bool,
-                        vol.Optional(
-                            "enable_smart_monitoring",
-                            default=conf.get("enable_smart_monitoring", True),
-                        ): bool,
+                        **self._sensor_group_fields(),
                         vol.Optional(
                             "smart_refresh_interval",
                             default=options.get("smart_refresh_interval", conf.get("smart_refresh_interval", 1)),

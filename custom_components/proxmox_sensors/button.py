@@ -22,6 +22,7 @@ from .logic.guest_deletion_cleanup import (
 )
 from .pbs_actions import run_gc, run_prune, run_verify, run_sync
 from .services import node_controls_enabled
+from .logic.entry_options import monitored_pbs_datastores
 from .const import DOMAIN, CONF_NODE, CONF_PLATFORM_TYPE
 from .logic.guest_keys import (
     make_guest_key,
@@ -404,7 +405,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
             "pbs_sync_jobs_by_datastore", {}
         )
 
-        for datastore_name in datastores.keys():
+        for datastore_name in monitored_pbs_datastores(entry, datastores):
             entities.append(PBSGCButton(coordinator, client, server_id, datastore_name))
 
             entities.append(
@@ -466,6 +467,15 @@ async def async_setup_entry(hass, entry, async_add_entities):
         for row in _excluded_guest_buttons(hass, entry, c_data, registry):
             registry.async_remove(row.entity_id)
         cleanup_excluded_guest_devices(hass)
+
+    if server_type == "PBS" and coordinator.last_update_success:
+        # Buttons for datastores or controls the user switched off would
+        # otherwise linger as unavailable entities.
+        registry = er.async_get(hass)
+        created = {getattr(entity, "_attr_unique_id", None) for entity in entities}
+        for row in er.async_entries_for_config_entry(registry, entry.entry_id):
+            if row.domain == "button" and row.unique_id not in created:
+                registry.async_remove(row.entity_id)
 
     _LOGGER.debug("Total button entities created: %d", len(entities))
     async_add_entities(entities)

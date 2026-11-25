@@ -22,6 +22,26 @@ Releases before the fork are listed in the
 ### Added
 - Reauthentication flow: a rotated password or token, or a changed server
   certificate, now opens a prompt instead of requiring the entry to be deleted.
+- Reconfigure: change an entry's host, user, sign-in method, secrets and
+  certificate checking in place. The server must be the same machine (same PVE
+  node, PBS instance or cluster name); a new host re-confirms its certificate.
+- PBS options: choose which datastores are monitored. Newly created
+  datastores are monitored automatically; deselected ones are removed with
+  their buttons and devices.
+- Cluster options: switch the backup, failed-task, firewall and HA sensor
+  groups on or off.
+- PVE options: switches for memory-module, backup-progress, storage-list and
+  nodes-list sensors, which existed but could not be changed.
+
+### Fixed
+- The VM/CT selection on the options page no longer disappears when another
+  node in the cluster is offline; that node's guests come from the cluster
+  inventory.
+- Saving the PBS or cluster options page no longer erases other stored
+  options, such as the PBS prune and sync job mappings.
+- A stale stored option can no longer silently override a PVE setting just
+  saved on the options page.
+- Wake-on-LAN MAC addresses are validated on the PVE and PBS options pages.
 - CI for the fork: hassfest and HACS validation, ruff, pytest with the Home
   Assistant test harness, shellcheck, and actionlint for the workflows.
 - Release workflow: publishes only from tags on `main` whose commit passed CI

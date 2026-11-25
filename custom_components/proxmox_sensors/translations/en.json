@@ -1,6 +1,11 @@
 {
   "config": {
     "step": {
+      "reconfigure": {
+        "title": "Reconfigure {title}",
+        "description": "Change how Home Assistant connects to this server. Leave a password or token secret blank to keep the stored one. The server type and node cannot change here; the server must be the same machine this entry represents.",
+        "data": {"host": "Host / IP address", "user": "User", "use_token": "Use an API token instead of a password", "password": "Password", "token_id": "Token ID", "token_secret": "Token Secret", "verify_ssl": "Verify SSL Certificate"}
+      },
       "confirm_certificate": {
         "title": "Confirm the server certificate",
         "description": "Certificate verification is off, so this certificate will be pinned and every later connection must present exactly the same one.\n\nServer: **{host}**\nSHA-256 fingerprint:\n`{fingerprint}`\n\nCompare it with the fingerprint in the Proxmox web interface (Node → System → Certificates) before continuing. Your credentials are sent only after you confirm.",
@@ -125,6 +130,9 @@
       }
     },
     "error": {
+      "node_not_found": "This server does not have the node this entry monitors. Point it at a member of the same cluster, or add the other node as a new entry.",
+      "different_server": "This is a different server than the one this entry monitors. Add it as a new entry instead.",
+      "secret_required": "Enter a password or a token ID and secret.",
       "certificate_changed": "The server certificate changed while connecting. Start again and review the new fingerprint.",
       "certificate_not_accepted": "The certificate changed. Confirm the new fingerprint to continue.",
       "recovery_unavailable": "The selected PVE group changed or its identity conflicts with the Registry. Choose again; no CLUSTER was created.",
@@ -137,6 +145,7 @@
       "unknown": "Unexpected error. Check Home Assistant logs."
     },
     "abort": {
+      "reconfigure_successful": "Connection settings updated.",
       "certificate_rejected": "Setup cancelled: the server certificate was not confirmed.",
       "reauth_successful": "Reauthentication was successful.",
       "scope_unavailable": "Could not generate an unused CLUSTER association. Try again.",
@@ -148,6 +157,7 @@
   },
   "options": {
     "error": {
+      "invalid_mac": "Enter a MAC address like AA:BB:CC:DD:EE:FF.",
       "guest_discovery_unavailable": "Guest discovery is unavailable. Guest selections will be preserved.",
       "guest_selection_changed": "Guest selections changed in another Options flow. Reopen Options and try again.",
       "guest_inventory_changed": "The guest inventory changed. Reopen Options and try again.",
@@ -183,6 +193,12 @@
           "enable_backup_progress": "Enable backup progress sensor",
           "enable_storage_list": "Enable storage list sensor",
           "enable_nodes_list": "Enable nodes list sensor",
+          "enable_memory_monitoring": "Enable memory module (DIMM) sensors",
+          "datastores": "Monitored datastores",
+          "enable_cluster_backups": "Enable backup job, age and health sensors",
+          "enable_cluster_failed_tasks": "Enable failed tasks sensor",
+          "enable_cluster_firewall": "Enable firewall sensor",
+          "enable_cluster_ha": "Enable high-availability sensor",
           "enable_cluster": "Enable cluster-wide monitoring",
           "enable_pbs_node_controls": "Enable PBS node power controls",
           "wol_mac": "Wake-on-LAN MAC address",

@@ -35,6 +35,7 @@ from .const import (
 )
 
 from .api import AuthenticationError, ProxmoxClient
+from .logic.entry_options import monitored_pbs_datastores
 from .tls import (
     DEFAULT_PORTS,
     display_fingerprint,
@@ -308,7 +309,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     }
 
     if data.get(CONF_PLATFORM_TYPE) == "PBS" and coordinator.last_update_success:
-        reconcile_pbs_devices(hass, entry, coordinator.data.get("pbs_datastores", {}))
+        reconcile_pbs_devices(
+            hass, entry,
+            monitored_pbs_datastores(entry, coordinator.data.get("pbs_datastores", {})),
+        )
 
     register_services(hass, entry)
 

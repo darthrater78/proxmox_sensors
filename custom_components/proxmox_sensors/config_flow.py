@@ -621,6 +621,7 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if not user_input.get("confirm", False):
                 return self.async_abort(reason="certificate_rejected")
             self._config[CONF_CERT_FINGERPRINT] = fingerprint
+            self._confirmed_certificate = (self._config[CONF_HOST], fingerprint)
             return await getattr(self, f"async_step_{step_id}")(saved_input)
         return self.async_show_form(
             step_id="confirm_certificate",
@@ -706,6 +707,146 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "new_fingerprint": display_fingerprint(current) if current else "-",
             },
         )
+
+    # ===== RECONFIGURE =======================================
+
+    async def async_step_reconfigure(self, user_input=None) -> FlowResult:
+        """Change connection settings in place.
+
+        Server type and PVE node stay fixed: they define the entity IDs and
+        history, so changing them really means adding a different device.
+        Blank secret fields keep the stored secret.
+        """
+        entry = self._get_reconfigure_entry()
+        data = dict(entry.data)
+        platform = _config_entry_platform(data)
+        token_only = platform in ("PBS", "PDM")
+        errors = {}
+
+        if user_input is not None:
+            host = str(user_input.get(CONF_HOST, "")).strip()
+            if host_error := _config_host_error(host, platform):
+                errors[CONF_HOST] = host_error
+            else:
+                candidate, secret_error = self._reconfigure_candidate(
+                    data, user_input, host, token_only
+                )
+                if secret_error:
+                    errors["base"] = secret_error
+                else:
+                    self._config = candidate
+                    confirm = await self._ensure_certificate("reconfigure", user_input)
+                    if confirm is not None:
+                        return confirm
+                    result = await self._finish_reconfigure(entry, platform)
+                    if not isinstance(result, str):
+                        return result
+                    errors["base"] = result
+
+        schema = {
+            vol.Required(CONF_HOST, default=data.get(CONF_HOST, "")): str,
+            vol.Required(CONF_USER, default=data.get(CONF_USER, "")): str,
+        }
+        if not token_only:
+            schema[vol.Required("use_token", default=bool(data.get(CONF_TOKEN_ID)))] = bool
+            schema[vol.Optional(CONF_PASSWORD)] = _SECRET
+        schema[vol.Optional(CONF_TOKEN_ID, default=data.get(CONF_TOKEN_ID) or "")] = str
+        schema[vol.Optional(CONF_TOKEN_SECRET)] = _SECRET
+        schema[vol.Optional(CONF_VERIFY_SSL, default=data.get(CONF_VERIFY_SSL, False))] = bool
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=vol.Schema(schema),
+            errors=errors,
+            description_placeholders={"title": entry.title},
+        )
+
+    def _reconfigure_candidate(self, data, user_input, host, token_only):
+        """Merge the form into the stored data; returns (candidate, error_key)."""
+        candidate = {
+            **data,
+            CONF_HOST: host,
+            CONF_USER: str(user_input.get(CONF_USER, "")).strip(),
+            CONF_VERIFY_SSL: bool(user_input.get(CONF_VERIFY_SSL, False)),
+        }
+        if token_only or user_input.get("use_token"):
+            candidate[CONF_TOKEN_ID] = user_input.get(CONF_TOKEN_ID) or data.get(CONF_TOKEN_ID)
+            candidate[CONF_TOKEN_SECRET] = (
+                user_input.get(CONF_TOKEN_SECRET) or data.get(CONF_TOKEN_SECRET)
+            )
+            candidate.pop(CONF_PASSWORD, None)
+            if not candidate[CONF_TOKEN_ID] or not candidate[CONF_TOKEN_SECRET]:
+                return candidate, "secret_required"
+        else:
+            candidate[CONF_PASSWORD] = user_input.get(CONF_PASSWORD) or data.get(CONF_PASSWORD)
+            candidate.pop(CONF_TOKEN_ID, None)
+            candidate.pop(CONF_TOKEN_SECRET, None)
+            if not candidate[CONF_PASSWORD]:
+                return candidate, "secret_required"
+        if candidate[CONF_VERIFY_SSL]:
+            candidate.pop(CONF_CERT_FINGERPRINT, None)
+        elif _normalized_config_host(host) != _normalized_config_host(data.get(CONF_HOST)):
+            # A different host must have its certificate confirmed again,
+            # unless the user just confirmed it in this flow.
+            confirmed = getattr(self, "_confirmed_certificate", None)
+            if confirmed and confirmed[0] == host:
+                candidate[CONF_CERT_FINGERPRINT] = confirmed[1]
+            else:
+                candidate.pop(CONF_CERT_FINGERPRINT, None)
+        return candidate, None
+
+    async def _finish_reconfigure(self, entry, platform):
+        """Validate the candidate against the same server; abort/save, or an error key."""
+        client = self._build_client("PVE" if platform in ("PVE", "CLUSTER") else platform)
+        try:
+            validation = await self._validate_connection(
+                client, *_VALIDATION_ENDPOINTS.get(platform, _VALIDATION_ENDPOINTS["PVE"])
+            )
+            identity_error = (
+                await self._reconfigure_identity_error(client, entry, platform)
+                if validation["has_minimum"] else None
+            )
+        except CertificateMismatchError:
+            return "certificate_changed"
+        except AuthenticationError:
+            return "invalid_auth"
+        except ProxmoxPermissionError:
+            return "insufficient_permissions"
+        except (CannotConnect, CertificateNotPinned):
+            return "cannot_connect"
+        except Exception:
+            _LOGGER.exception("Unexpected error during reconfiguration")
+            return "unknown"
+        if not validation["has_minimum"]:
+            return "insufficient_permissions"
+        if identity_error:
+            return identity_error
+
+        unique_id = _config_entry_unique_id(self._config) or entry.unique_id
+        if unique_id != entry.unique_id and any(
+            other.entry_id != entry.entry_id and other.unique_id == unique_id
+            for other in self.hass.config_entries.async_entries(DOMAIN)
+        ):
+            return self.async_abort(reason="already_configured")
+        return self.async_update_reload_and_abort(
+            entry, unique_id=unique_id, data=self._config
+        )
+
+    async def _reconfigure_identity_error(self, client, entry, platform):
+        """Refuse to point an entry at a different machine than it represents."""
+        data = entry.data
+        if platform == "PVE":
+            nodes = await client.get(self.hass, "nodes", raise_errors=True) or []
+            names = {str(node.get("node")) for node in nodes if isinstance(node, dict)}
+            return None if data.get(CONF_NODE) in names else "node_not_found"
+        if platform == "PBS" and data.get("pbs_instance_id"):
+            instance_id = await client.get_pbs_instance_id(self.hass)
+            if instance_id and instance_id != data["pbs_instance_id"]:
+                return "different_server"
+        if platform == "CLUSTER" and data.get("cluster_name"):
+            status = await client.get_cluster_status(self.hass, raise_errors=True)
+            if status.get("name") and status["name"] != data["cluster_name"]:
+                return "different_server"
+        return None
 
     async def _validate_connection(
         self,
