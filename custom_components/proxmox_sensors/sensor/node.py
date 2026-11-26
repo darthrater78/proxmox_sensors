@@ -900,7 +900,6 @@ class PVEBackupProgressSensor(ProxmoxBaseSensor):
     """Sensor for backup progress in PVE using available tasks data."""
 
     def __init__(self, coordinator, node, entry_id):
-        name = "node_backup_progress"
         uid = f"proxmox_backup_progress_{node}"
 
         super().__init__(
@@ -944,13 +943,11 @@ class PVEBackupProgressSensor(ProxmoxBaseSensor):
     def _extract_vmid(self, task):
         upid = str(task.get("upid", ""))
 
-        try:
-            if "vm/" in upid:
-                return upid.split("vm/")[1].split(":")[0]
-            if "ct/" in upid:
-                return upid.split("ct/")[1].split(":")[0]
-        except Exception:
-            pass
+        # split() always has a second part once the marker is present.
+        if "vm/" in upid:
+            return upid.split("vm/")[1].split(":")[0]
+        if "ct/" in upid:
+            return upid.split("ct/")[1].split(":")[0]
 
         return "unknown"
 

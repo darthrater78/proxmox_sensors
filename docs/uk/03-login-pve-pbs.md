@@ -1,9 +1,9 @@
 # 🔌 Крок 3: Home Assistant — PVE, PBS і CLUSTER
 
 ## 1. HACS
-[![Відкрити в HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=Javisen&repository=proxmox_sensors&category=integration)
+[![Відкрити в HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=darthrater78&repository=proxmox_sensors&category=integration)
 
-Інтеграція є у стандартному репозиторії HACS; custom repository не потрібен. Знайдіть **Proxmox Extended Sensors** у **HACS → Інтеграції**, завантажте й перезапустіть Home Assistant.
+Цей форк встановлюється як власний репозиторій HACS і використовує той самий домен інтеграції, що й початковий проєкт, тому спершу видаліть початкове завантаження. У **HACS → ⋮ → Власні репозиторії** додайте `https://github.com/darthrater78/proxmox_sensors` з типом **Інтеграція**, знайдіть **Proxmox Extended Sensors**, завантажте й перезапустіть Home Assistant.
 
 ## 2. Додати інтеграцію
 **Налаштування → Пристрої та служби → Додати інтеграцію → Proxmox Extended Sensors**. Типи: **PVE**, **PBS**, **CLUSTER**.

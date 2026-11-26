@@ -4,7 +4,7 @@
 Controleer bereikbaarheid, user/realm, actieve token, secret, API-rechten en SSL. `Permission denied` betekent vaak onvoldoende rechten.
 
 ## 🌡️ Hardware en Sidecar
-Bij ontbrekende temperaturen: `sensors`, `systemctl status pve-sensors.service`, daarna `http://PROXMOX_IP:9000/sensors`.
+Bij ontbrekende temperaturen: `sensors`, daarna `systemctl status pve-sensors.service`. Kijk vervolgens bij **Instellingen → Reparaties** in Home Assistant: een Sidecar die het token weigert, een ander certificaat toont of nog onversleuteld HTTP gebruikt, wordt daar gemeld. De Sidecar logt fouten op de node: `journalctl -u pve-sensors.service -n 50`.
 
 **Sidecar Status** vat Memory, Mounts, Sensors en SMART samen (`ok`, `degraded`, `error`, `unknown`). V5 bewaart waar mogelijk laatste geldige waarden.
 

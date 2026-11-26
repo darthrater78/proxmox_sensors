@@ -5,7 +5,6 @@ import re
 from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
 
 from .base import ProxmoxBaseSensor, node_section
-from ..const import DOMAIN
 
 
 def detect_sensor_type(value):
@@ -349,8 +348,8 @@ class ProxmoxHardwareSensor(ProxmoxBaseSensor):
                 if 1 < f < 145:
                     return round(f, 1)
 
-        except Exception:
-            pass
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            pass  # not a usable reading: the sensor reports no value
 
         return None
 

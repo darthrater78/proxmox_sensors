@@ -1,6 +1,22 @@
 {
   "config": {
     "step": {
+      "reconfigure": {
+        "title": "Reconfigure {title}",
+        "description": "Change how Home Assistant connects to this server. Leave a password or token secret blank to keep the stored one. The server type and node cannot change here; the server must be the same machine this entry represents.",
+        "data": {"host": "Host / IP address", "user": "User", "use_token": "Use an API token instead of a password", "password": "Password", "token_id": "Token ID", "token_secret": "Token Secret", "verify_ssl": "Verify SSL Certificate", "sidecar_token": "Sidecar token", "sidecar_fingerprint": "Sidecar certificate SHA-256"},
+        "data_description": {"sidecar_token": "Printed by install-sidecar.sh. Leave blank to keep the stored token.", "sidecar_fingerprint": "Printed by install-sidecar.sh. Leave empty for a sidecar in legacy plain-HTTP mode, or none."}
+      },
+      "confirm_certificate": {
+        "title": "Confirm the server certificate",
+        "description": "Certificate verification is off, so this certificate will be pinned and every later connection must present exactly the same one.\n\nServer: **{host}**\nSHA-256 fingerprint:\n`{fingerprint}`\n\nCompare it with the fingerprint in the Proxmox web interface (Node → System → Certificates) before continuing. Your credentials are sent only after you confirm.",
+        "data": {"confirm": "The fingerprint matches my Proxmox server"}
+      },
+      "reauth_confirm": {
+        "title": "Reauthenticate {title}",
+        "description": "Home Assistant could not sign in to **{host}**, or its certificate changed.\n\nPinned fingerprint: `{old_fingerprint}`\nCurrent fingerprint: `{new_fingerprint}`\n\nEnter a new password or token secret if it changed (leave blank to keep the current one). If the fingerprint changed, confirm it in the Proxmox web interface (Node → System → Certificates) before accepting it.",
+        "data": {"password": "Password", "token_secret": "Token Secret", "accept_certificate": "Accept the new certificate fingerprint"}
+      },
       "user": {
         "title": "1. Server Connection",
         "description": "Enter your Proxmox server address. The port is managed automatically (8006 for PVE / 8007 for PBS / 8443 for PDM).",
@@ -115,6 +131,17 @@
       }
     },
     "error": {
+      "node_not_found": "This server does not have the node this entry monitors. Point it at a member of the same cluster, or add the other node as a new entry.",
+      "different_server": "This is a different server than the one this entry monitors. Add it as a new entry instead.",
+      "secret_required": "Enter a password or a token ID and secret.",
+      "sidecar_fingerprint_required": "Enter the sidecar certificate fingerprint printed by the installer together with the token.",
+      "invalid_sidecar_fingerprint": "The sidecar fingerprint must be a SHA-256 fingerprint (64 hex digits, colons optional).",
+      "sidecar_token_required": "Enter the sidecar token printed by the installer.",
+      "sidecar_certificate_changed": "The sidecar presented a different certificate than the fingerprint entered. Check the installer's output.",
+      "sidecar_auth_failed": "The sidecar rejected the token, or this Home Assistant address is not in its allow-list.",
+      "sidecar_cannot_connect": "Could not reach the sidecar over HTTPS on port 9000. Check it was installed without --legacy-http and is running.",
+      "certificate_changed": "The server certificate changed while connecting. Start again and review the new fingerprint.",
+      "certificate_not_accepted": "The certificate changed. Confirm the new fingerprint to continue.",
       "recovery_unavailable": "The selected PVE group changed or its identity conflicts with the Registry. Choose again; no CLUSTER was created.",
       "cluster_unavailable": "The selected cluster is no longer available for joining. Go back or select another cluster.",
       "invalid_host": "Enter a valid hostname or IP address without a protocol, path, or port.",
@@ -125,6 +152,9 @@
       "unknown": "Unexpected error. Check Home Assistant logs."
     },
     "abort": {
+      "reconfigure_successful": "Connection settings updated.",
+      "certificate_rejected": "Setup cancelled: the server certificate was not confirmed.",
+      "reauth_successful": "Reauthentication was successful.",
       "scope_unavailable": "Could not generate an unused CLUSTER association. Try again.",
       "no_nodes_visible": "No visible nodes were found. Check the account permissions and cluster configuration.",
       "already_configured": "This node is already configured.",
@@ -132,8 +162,23 @@
       "cluster_no_options": "Cluster settings are managed from the PVE node configuration."
     }
   },
+  "issues": {
+    "sidecar_insecure": {
+      "title": "Sidecar on {host} uses plain HTTP",
+      "description": "The hardware sidecar for **{title}** answers over unencrypted HTTP and is protected only by its IP allow-list, so anyone on the network path can read or spoof its data. Re-run the latest `install-sidecar.sh` on the node (without `--legacy-http`), then open this entry's **Reconfigure** page and enter the token and certificate fingerprint it prints."
+    },
+    "sidecar_certificate_changed": {
+      "title": "Sidecar certificate on {host} changed",
+      "description": "The hardware sidecar for **{title}** no longer presents the pinned certificate, so no requests are sent to it. If you re-ran the installer with `--rotate-cert`, enter the new fingerprint on this entry's **Reconfigure** page. Otherwise, investigate before trusting the node's network path."
+    },
+    "sidecar_auth_failed": {
+      "title": "Sidecar on {host} rejected Home Assistant",
+      "description": "The hardware sidecar for **{title}** refused the token, or this Home Assistant address is not in its allow-list. Enter the current token on this entry's **Reconfigure** page, or re-run the installer with the right addresses."
+    }
+  },
   "options": {
     "error": {
+      "invalid_mac": "Enter a MAC address like AA:BB:CC:DD:EE:FF.",
       "guest_discovery_unavailable": "Guest discovery is unavailable. Guest selections will be preserved.",
       "guest_selection_changed": "Guest selections changed in another Options flow. Reopen Options and try again.",
       "guest_inventory_changed": "The guest inventory changed. Reopen Options and try again.",
@@ -169,6 +214,12 @@
           "enable_backup_progress": "Enable backup progress sensor",
           "enable_storage_list": "Enable storage list sensor",
           "enable_nodes_list": "Enable nodes list sensor",
+          "enable_memory_monitoring": "Enable memory module (DIMM) sensors",
+          "datastores": "Monitored datastores",
+          "enable_cluster_backups": "Enable backup job, age and health sensors",
+          "enable_cluster_failed_tasks": "Enable failed tasks sensor",
+          "enable_cluster_firewall": "Enable firewall sensor",
+          "enable_cluster_ha": "Enable high-availability sensor",
           "enable_cluster": "Enable cluster-wide monitoring",
           "enable_pbs_node_controls": "Enable PBS node power controls",
           "wol_mac": "Wake-on-LAN MAC address",

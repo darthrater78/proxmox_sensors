@@ -6,12 +6,12 @@ This guide explains how to install **Proxmox Extended Sensors V5** and add PVE, 
 
 ## 1. Install via HACS
 
-[![Open your Home Assistant instance and open Proxmox Extended Sensors in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=Javisen&repository=proxmox_sensors&category=integration)
+[![Open your Home Assistant instance and open this fork in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=darthrater78&repository=proxmox_sensors&category=integration)
 
-**Proxmox Extended Sensors is included in the default HACS repository. You do not need to add a custom repository.**
+This fork is installed as a **HACS custom repository**. It uses the same integration domain as the upstream project, so remove the upstream download first; the two cannot be installed side by side.
 
-1. Open **HACS → Integrations**.
-2. Search for **Proxmox Extended Sensors**.
+1. Open **HACS → ⋮ → Custom repositories**, add `https://github.com/darthrater78/proxmox_sensors` with type **Integration**.
+2. Search for **Proxmox Extended Sensors** and open the entry from `darthrater78/proxmox_sensors`.
 3. Download it.
 4. Restart Home Assistant.
 

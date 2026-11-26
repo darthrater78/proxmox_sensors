@@ -1,6 +1,20 @@
 #!/usr/bin/env python3
+"""Proxmox Extended Sensors hardware sidecar.
+
+Serves read-only hardware data (lm-sensors, SMART, memory modules, mounts,
+KSM) to Home Assistant. Configuration: /etc/proxmox-sensors/sidecar.conf
+
+Secure mode (the installer's default): HTTPS with a self-signed certificate
+that Home Assistant pins, plus a bearer token, plus the client IP allow-list.
+Compatibility mode (no TOKEN in the config): plain HTTP with the IP allow-list
+only, for integrations older than the fork's sidecar support.
+"""
+import hmac
 import json
 import os
+import socket
+import ssl
+import sys
 import subprocess
 import re
 import hashlib
@@ -17,32 +31,92 @@ from urllib.parse import parse_qs, urlsplit
 CONFIG_PATH = "/etc/proxmox-sensors/sidecar.conf"
 
 
-def load_allowed_ips():
-    """Load and validate the allowed client IP list from the sidecar config."""
-    if not os.path.exists(CONFIG_PATH):
-        raise RuntimeError(f"Missing sidecar configuration: {CONFIG_PATH}")
+DEFAULT_PORT = 9000
+MAX_CONCURRENT_REQUESTS = 8
+REQUEST_TIMEOUT = 15  # seconds a client may take to send its request
+MIN_TOKEN_LENGTH = 32
+MAX_LOG_LENGTH = 500
+
+
+def _log(message):
+    """One line to stderr (the systemd journal), control characters removed."""
+    text = "".join(ch if ch.isprintable() else " " for ch in str(message))
+    print(f"PVE Sensors API: {text[:MAX_LOG_LENGTH]}", file=sys.stderr, flush=True)
+
+
+class SidecarConfig:
+    """Validated sidecar settings."""
+
+    def __init__(self, allowed_ips, token=None, cert=None, key=None,
+                 bind="0.0.0.0", port=DEFAULT_PORT):
+        self.allowed_ips = frozenset(allowed_ips)
+        self.token = token
+        self.cert = cert
+        self.key = key
+        self.bind = bind
+        self.port = port
+
+    @property
+    def secure(self):
+        return self.token is not None
+
+
+def parse_config(text):
+    """Parse KEY=VALUE lines into a SidecarConfig; raises RuntimeError."""
+    values = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip().strip("\"'")
 
     allowed = []
-    with open(CONFIG_PATH, "r", encoding="utf-8") as config_file:
-        for raw_line in config_file:
-            line = raw_line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            if key.strip() == "ALLOWED_IPS":
-                for item in value.split(","):
-                    candidate = item.strip()
-                    if not candidate:
-                        continue
-                    allowed.append(str(ipaddress.ip_address(candidate)))
-
+    for item in values.get("ALLOWED_IPS", "").split(","):
+        candidate = item.strip()
+        if candidate:
+            try:
+                allowed.append(str(ipaddress.ip_address(candidate)))
+            except ValueError as err:
+                raise RuntimeError(f"Invalid address in ALLOWED_IPS: {candidate!r}") from err
     if not allowed:
         raise RuntimeError("ALLOWED_IPS is missing or empty")
 
-    return frozenset(allowed)
+    token = values.get("TOKEN") or None
+    cert = values.get("TLS_CERT") or None
+    key = values.get("TLS_KEY") or None
+    if token is not None:
+        if len(token) < MIN_TOKEN_LENGTH:
+            raise RuntimeError(f"TOKEN must be at least {MIN_TOKEN_LENGTH} characters")
+        if not cert or not key:
+            # A token sent over plain HTTP could be read by anyone on the path.
+            raise RuntimeError("TOKEN requires TLS_CERT and TLS_KEY")
+    elif cert or key:
+        raise RuntimeError("TLS_CERT/TLS_KEY are set without TOKEN; add TOKEN or remove them")
+
+    try:
+        port = int(values.get("PORT", DEFAULT_PORT))
+    except ValueError as err:
+        raise RuntimeError("PORT must be a number") from err
+    if not 1 <= port <= 65535:
+        raise RuntimeError("PORT must be between 1 and 65535")
+    bind = values.get("BIND", "0.0.0.0")
+    try:
+        bind = str(ipaddress.IPv4Address(bind))
+    except ValueError as err:
+        raise RuntimeError("BIND must be an IPv4 address") from err
+    return SidecarConfig(allowed, token, cert, key, bind, port)
 
 
-ALLOWED_IPS = load_allowed_ips()
+def load_config(path=CONFIG_PATH):
+    """Load the config file, refusing one that others can read when it holds a token."""
+    if not os.path.exists(path):
+        raise RuntimeError(f"Missing sidecar configuration: {path}")
+    with open(path, "r", encoding="utf-8") as config_file:
+        config = parse_config(config_file.read())
+    if config.secure and os.stat(path).st_mode & 0o077:
+        raise RuntimeError(f"{path} holds the token and must not be readable by others (chmod 600)")
+    return config
 
 STORCLI_CANDIDATES = (
     "storcli64", "storcli", "/opt/MegaRAID/storcli/storcli64",
@@ -158,20 +232,43 @@ def _cached_hba_temps():
 
 
 class Handler(BaseHTTPRequestHandler):
+    server_version = "PVESensors"
+    sys_version = ""
+    timeout = REQUEST_TIMEOUT
+
     def _client_is_allowed(self):
-        return self.client_address[0] in ALLOWED_IPS
+        return self.server.client_is_allowed(self.client_address[0])
+
+    def _token_is_valid(self):
+        token = self.server.config.token
+        if token is None:
+            return True
+        header = self.headers.get("Authorization", "")
+        scheme, _, supplied = header.partition(" ")
+        return scheme.lower() == "bearer" and hmac.compare_digest(
+            supplied.strip().encode(), token.encode()
+        )
+
+    def _send_status_json(self, code, error, extra_headers=()):
+        payload = json.dumps({"error": error}).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "no-store")
+        for name, value in extra_headers:
+            self.send_header(name, value)
+        self.end_headers()
+        self.wfile.write(payload)
 
     def _send_forbidden(self):
-        payload = json.dumps({"error": "forbidden"})
-        self.send_response(403)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload.encode())))
-        self.end_headers()
-        self.wfile.write(payload.encode())
+        self._send_status_json(403, "forbidden")
 
     def do_GET(self):
         if not self._client_is_allowed():
             self._send_forbidden()
+            return
+        if not self._token_is_valid():
+            self._send_status_json(401, "unauthorized", (("WWW-Authenticate", "Bearer"),))
             return
         if self.path == "/sensors":
             self._handle_sensors()
@@ -190,8 +287,7 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/ksm":
             self._handle_ksm()
         else:
-            self.send_response(404)
-            self.end_headers()
+            self._send_status_json(404, "not found")
 
     def _handle_sensors(self):
         """Handle lm-sensors data."""
@@ -212,7 +308,7 @@ class Handler(BaseHTTPRequestHandler):
                     pass
             self._send_json_response(data)
         except Exception as e:
-            self._send_error_response(f"Error getting sensors: {e}")
+            self._send_error_response("Error getting sensors", e)
 
     def _handle_smart(self):
         """Handle SMART data - optimized version."""
@@ -220,7 +316,7 @@ class Handler(BaseHTTPRequestHandler):
             smart_data = self._get_smart_data_fast()
             self._send_json_response(json.dumps(smart_data))
         except Exception as e:
-            self._send_error_response(f"Error getting SMART data: {e}")
+            self._send_error_response("Error getting SMART data", e)
 
     def _handle_smart_disk(self):
         """Query one inventory-selected block device, without a global scan."""
@@ -301,7 +397,7 @@ class Handler(BaseHTTPRequestHandler):
             smart_data = self._get_smart_data_extended()
             self._send_json_response(json.dumps(smart_data))
         except Exception as e:
-            self._send_error_response(f"Error: {e}")
+            self._send_error_response("Error getting extended SMART data", e)
 
     def _handle_memory(self):
         """Handle memory information from dmidecode."""
@@ -312,7 +408,7 @@ class Handler(BaseHTTPRequestHandler):
             )
 
             if result.returncode != 0:
-                self._send_error_response(f"dmidecode failed: {result.stderr}")
+                self._send_error_response("dmidecode failed", result.stderr.strip())
                 return
 
             memory_data = []
@@ -373,7 +469,7 @@ class Handler(BaseHTTPRequestHandler):
         except subprocess.TimeoutExpired:
             self._send_error_response("dmidecode timeout (10s)")
         except Exception as e:
-            self._send_error_response(f"Error getting memory info: {e}")
+            self._send_error_response("Error getting memory info", e)
 
     def _handle_health(self):
         """Return health status."""
@@ -393,7 +489,7 @@ class Handler(BaseHTTPRequestHandler):
             }
             self._send_json_response(json.dumps(health_data))
         except Exception as e:
-            self._send_error_response(f"Error: {e}")
+            self._send_error_response("Error getting health status", e)
 
     def _handle_mounts(self):
         """Handle disk mount status via lsblk."""
@@ -406,7 +502,7 @@ class Handler(BaseHTTPRequestHandler):
             )
 
             if result.returncode != 0:
-                self._send_error_response(f"lsblk failed: {result.stderr}")
+                self._send_error_response("lsblk failed", result.stderr.strip())
                 return
 
             raw = json.loads(result.stdout)
@@ -472,8 +568,8 @@ class Handler(BaseHTTPRequestHandler):
 
                             df_mounts.append({"source": source, "target": target})
 
-            except Exception:
-                pass
+            except (OSError, ValueError, subprocess.TimeoutExpired) as err:
+                _log(f"df mount listing failed: {err}")
 
             response = {
                 "mounted": mounted,
@@ -486,7 +582,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json_response(json.dumps(response))
 
         except Exception as e:
-            self._send_error_response(f"Error getting mount info: {e}")
+            self._send_error_response("Error getting mount info", e)
 
     def _handle_ksm(self):
         """Expose a fixed, read-only KSM snapshot without client-controlled commands."""
@@ -569,8 +665,9 @@ class Handler(BaseHTTPRequestHandler):
 
             return smart_data
 
-        except Exception as e:
-            return {"error": f"Scan failed: {str(e)}"}
+        except Exception as e:  # noqa: BLE001 - report any scan failure as a payload
+            _log(f"SMART scan failed: {e}")
+            return {"error": "SMART scan failed"}
 
     def _get_smart_data_extended(self):
         """Get extended SMART data with retry logic."""
@@ -585,8 +682,6 @@ class Handler(BaseHTTPRequestHandler):
         return smart_data
 
     def _get_disk_info_safe(self, device, device_type, timeout=10):
-        device_key = device.replace("/dev/", "")
-
         try:
             if device_type == "scsi":
                 base_cmd = ["smartctl", "-a", "-d", "scsi"]
@@ -595,10 +690,20 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 base_cmd = ["smartctl", "-a", "-d", "sat"]
 
-            cmd_json = base_cmd + ["-j", device]
+            # -n standby: a disk that is spun down is reported, not woken.
+            # Exit code 3 is smartctl's "device is in standby" for this flag.
+            cmd_json = base_cmd + ["-n", "standby,3", "-j", device]
             result = subprocess.run(
                 cmd_json, capture_output=True, text=True, timeout=timeout
             )
+            if result.returncode == 3:
+                return {
+                    "model": "Device (standby)",
+                    "smart_available": False,
+                    "standby": True,
+                    "device_type": device_type,
+                    "path": device,
+                }
 
             if result.returncode == 0:
                 disk_info = json.loads(result.stdout)
@@ -614,8 +719,8 @@ class Handler(BaseHTTPRequestHandler):
                         result_info.stdout, result.returncode
                     )
 
-        except (subprocess.TimeoutExpired, json.JSONDecodeError, Exception):
-            pass
+        except (OSError, ValueError, subprocess.TimeoutExpired) as err:
+            _log(f"SMART query for {device} failed: {err}")
 
         return None
 
@@ -886,8 +991,8 @@ class Handler(BaseHTTPRequestHandler):
                         bytes_str = match.group(1).replace(",", "").replace(".", "")
                         bytes_val = int(bytes_str)
                         parsed["capacity_gb"] = round(bytes_val / (1024**3), 1)
-                    except:
-                        pass
+                    except ValueError:
+                        pass  # unparsable capacity: leave the field out
 
         return parsed
 
@@ -1037,8 +1142,8 @@ class Handler(BaseHTTPRequestHandler):
                             if match:
                                 detailed["uncorrectable_errors"] = int(match.group(4))
 
-        except Exception:
-            pass
+        except (OSError, ValueError, subprocess.TimeoutExpired) as err:
+            _log(f"Detailed SMART query for {device} failed: {err}")
 
         return detailed
 
@@ -1046,7 +1151,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             result = subprocess.run(["sensors", "-v"], capture_output=True, timeout=3)
             return result.returncode == 0
-        except Exception:
+        except (OSError, subprocess.TimeoutExpired):
             return False
 
     def _check_smartctl(self):
@@ -1055,7 +1160,7 @@ class Handler(BaseHTTPRequestHandler):
                 ["smartctl", "--version"], capture_output=True, timeout=3
             )
             return result.returncode == 0
-        except Exception:
+        except (OSError, subprocess.TimeoutExpired):
             return False
 
     def _get_disk_health_summary(self):
@@ -1071,43 +1176,126 @@ class Handler(BaseHTTPRequestHandler):
                     failed += 1
 
             return {"working": working, "failed": failed, "total": working + failed}
-        except Exception:
+        except (AttributeError, TypeError) as err:
+            _log(f"Disk health summary failed: {err}")
             return {"working": 0, "failed": 0, "total": 0}
 
     def _send_json_response(self, data):
+        body = data if isinstance(data, bytes) else data.encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        if isinstance(data, bytes):
-            self.wfile.write(data)
-        else:
-            self.wfile.write(data.encode())
+        self.wfile.write(body)
 
-    def _send_error_response(self, message):
-        error_data = json.dumps({"error": message})
-        self.send_response(500)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(error_data.encode())
+    def _send_error_response(self, message, detail=None):
+        """Send a fixed 500 message; the detail goes to the journal, never the client.
+
+        Exception text and command stderr can carry device paths, serial
+        numbers and other host details, so the client only sees ``message``.
+        """
+        if detail is not None:
+            _log(f"{urlsplit(self.path).path}: {message}: {detail}")
+        self._send_status_json(500, message)
 
     def log_message(self, format, *args):
         pass
 
 
+class SidecarServer(ThreadingHTTPServer):
+    """HTTP(S) server with an IP check before TLS and a cap on busy threads."""
+
+    daemon_threads = True
+    request_queue_size = 16
+
+    def __init__(self, config, handler=None, ssl_context=None):
+        self.config = config
+        self.ssl_context = ssl_context
+        self._slots = threading.BoundedSemaphore(MAX_CONCURRENT_REQUESTS)
+        super().__init__((config.bind, config.port), handler or Handler)
+
+    def client_is_allowed(self, address):
+        try:
+            address = ipaddress.ip_address(address)
+        except ValueError:
+            return False
+        mapped = getattr(address, "ipv4_mapped", None)
+        return str(mapped or address) in self.config.allowed_ips
+
+    def verify_request(self, request, client_address):
+        # Drop unknown clients before spending a TLS handshake or a thread.
+        return self.client_is_allowed(client_address[0])
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            # Busy: refuse instead of queueing unbounded threads.
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+    def finish_request(self, request, client_address):
+        request.settimeout(REQUEST_TIMEOUT)
+        if self.ssl_context is None:
+            super().finish_request(request, client_address)
+            return
+        try:
+            # The handshake runs here, in the request's own thread, under the
+            # socket timeout, so a stalled client cannot block the listener.
+            tls = self.ssl_context.wrap_socket(request, server_side=True)
+        except (ssl.SSLError, OSError):
+            return
+        try:
+            super().finish_request(tls, client_address)
+        finally:
+            try:
+                tls.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            tls.close()
+
+
+def build_ssl_context(config):
+    if not config.secure:
+        return None
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(config.cert, config.key)
+    return context
+
+
 def main():
-    port = 9000
-    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
-    print(f"PVE Sensors API v2 started on port {port}")
-    print(f"Allowed client IPs: {', '.join(sorted(ALLOWED_IPS))}")
+    try:
+        config = load_config()
+    except (RuntimeError, OSError) as err:
+        print(f"PVE Sensors API: {err}", file=sys.stderr)
+        sys.exit(2)
+    server = SidecarServer(config, ssl_context=build_ssl_context(config))
+    scheme = "https" if config.secure else "http"
+    print(f"PVE Sensors API v3 started on {scheme}://{config.bind}:{config.port}")
+    print(f"Allowed client IPs: {', '.join(sorted(config.allowed_ips))}")
+    if not config.secure:
+        print("WARNING: compatibility mode - plain HTTP, no token. Re-run the "
+              "installer without --legacy-http to enable HTTPS and a token.")
     print("Endpoints:")
-    print(f"  GET /sensors         - lm-sensors data")
-    print(f"  GET /smart           - Basic SMART data (fast)")
-    print(f"  GET /smart-disk      - One disk with optional standby protection")
-    print(f"  GET /smart-extended  - Extended SMART data")
-    print(f"  GET /memory          - Memory module information")
-    print(f"  GET /health          - System health status")
-    print(f"  GET /mounts          - Disk mount status")
-    print(f"  GET /ksm             - KSM status and counters")
+    print("  GET /sensors         - lm-sensors data")
+    print("  GET /smart           - Basic SMART data (fast)")
+    print("  GET /smart-disk      - One disk with optional standby protection")
+    print("  GET /smart-extended  - Extended SMART data")
+    print("  GET /memory          - Memory module information")
+    print("  GET /health          - System health status")
+    print("  GET /mounts          - Disk mount status")
+    print("  GET /ksm             - KSM status and counters")
     server.serve_forever()
 
 

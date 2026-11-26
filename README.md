@@ -1,8 +1,12 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Javisen/proxmox_sensors/main/img/logo_int.png" alt="Proxmox Extended Sensors Logo" width="600"/>
+  <img src="img/logo_int.png" alt="Proxmox Extended Sensors Logo" width="600"/>
 </p>
 
 > **Advanced Proxmox VE, PBS & PDM monitoring, control and dashboard integration for Home Assistant.**
+
+> [!NOTE]
+> This is **[darthrater78/proxmox_sensors](https://github.com/darthrater78/proxmox_sensors)**, a security-hardened fork of [Javisen/proxmox_sensors](https://github.com/Javisen/proxmox_sensors). It uses date versions (`YYYY.M.D`) and its own release pipeline.
+> **[Release notes for v2026.11.26](https://github.com/darthrater78/proxmox_sensors/releases/tag/v2026.11.26)** · [All releases](https://github.com/darthrater78/proxmox_sensors/releases) · [Changelog](CHANGELOG.md) · [Security architecture](#-security-architecture)
 
 # 🚀 Proxmox Extended Sensors
 
@@ -36,6 +40,7 @@
 - [Proxmox Backup Server (PBS)](#%EF%B8%8F-proxmox-backup-server-pbs)
 - [Remote / Hosted PBS](#%EF%B8%8F-remote--hosted-pbs)
 - [Multi-PBS Support](#-multi-pbs-support)
+- [Hardware Sidecar](#-hardware-sidecar)
 - [Sidecar Status](#%EF%B8%8F-sidecar-status)
 - [Cluster Monitoring](#-cluster-monitoring)
 - [Mounted Disks & Network Storage](#-mounted-disks--network-storage)
@@ -45,7 +50,8 @@
 - [Backup Services](#-backup-services-vms--cts)
 - [Supported Versions](#-supported-versions)
 - [Installation](#-installation)
-- [Development](https://proxmox-sensors.es/development/) 
+- [Security Architecture](#-security-architecture)
+- [Changelog](CHANGELOG.md)
 ---
 
 ## 🚀 Introduction
@@ -72,19 +78,29 @@ The integration is designed for both standalone Proxmox nodes and multi-node env
 - 🎨 **Dynamic Proxmox Dashboard** — PVE, PBS, CLUSTER and PDM dashboards generated from the resources available in Home Assistant.
 
 > [!CAUTION]
-> **Upgrading from an older installation?**  
-> Keep the sidecar script updated on every PVE node so its endpoints remain aligned with the integration.
+> **Upgrading from an older installation?**
+> Re-run the sidecar installer on every PVE node (see [Hardware Sidecar](#-hardware-sidecar)) so its endpoints stay aligned with the integration and it switches to HTTPS with a token.
 
-<details>
-<summary>Update <code>pve-sensors-api.py</code></summary>
+---
+
+## 🔌 Hardware Sidecar
+
+Temperatures, fans, SMART, memory modules, mounts and KSM come from a small optional service on each PVE node, `pve-sensors-api.py`, listening on port 9000. Install or update it as root on the node:
 
 ```bash
-wget https://raw.githubusercontent.com/Javisen/proxmox_sensors/main/scripts/pve-sensors-api.py -O /usr/local/bin/pve-sensors-api.py
-chmod +x /usr/local/bin/pve-sensors-api.py
-systemctl restart pve-sensors.service
+bash <(curl -fsSL https://github.com/darthrater78/proxmox_sensors/releases/latest/download/install-sidecar.sh)
 ```
 
-</details>
+The installer:
+
+- asks which Home Assistant IP addresses may connect (or pass `--allowed-ips 192.0.2.50`);
+- downloads `pve-sensors-api.py` from this fork's latest release and refuses to install it unless it matches the release's `SHA256SUMS` (`--version TAG` installs a specific release, `--local DIR` a copy you downloaded and checked yourself);
+- generates a self-signed certificate and a random token (both kept on re-runs; `--rotate-cert` / `--rotate-token` replace them);
+- installs a sandboxed systemd service that only the allowed addresses can reach, and prints the **token** and the **certificate SHA-256 fingerprint**.
+
+Then, in Home Assistant, open the node's Proxmox entry → **⋮ → Reconfigure** and enter the **Sidecar token** and **Sidecar certificate SHA-256**. Home Assistant checks them against the sidecar before saving, and from then on sends requests only to that exact certificate.
+
+`--legacy-http` keeps the old plain-HTTP, IP-only behaviour for integration versions without token support. While a sidecar answers over plain HTTP, Home Assistant shows a **repair warning** for that entry; a changed sidecar certificate or a rejected token shows a repair error instead.
 
 ---
 
@@ -156,7 +172,7 @@ The integration does not overwrite a dashboard that you have taken control of.
 <summary><b>PVE</b></summary>
 
 <br>
-<img src="https://github.com/Javisen/proxmox_sensors/raw/refs/heads/main/img/Dashb_Node.png" alt="PVE dashboard" width="100%">
+<img src="img/Dashb_Node.png" alt="PVE dashboard" width="100%">
 
 </details>
 
@@ -164,7 +180,7 @@ The integration does not overwrite a dashboard that you have taken control of.
 <summary><b>PBS</b></summary>
 
 <br>
-<img src="https://github.com/Javisen/proxmox_sensors/raw/refs/heads/main/img/Dashb_PBS.png" alt="PBS dashboard" width="100%">
+<img src="img/Dashb_PBS.png" alt="PBS dashboard" width="100%">
 
 </details>
 
@@ -172,7 +188,7 @@ The integration does not overwrite a dashboard that you have taken control of.
 <summary><b>CLUSTER</b></summary>
 
 <br>
-<img src="https://github.com/Javisen/proxmox_sensors/raw/refs/heads/main/img/Dashb_Cluster.png" alt="CLUSTER dashboard" width="100%">
+<img src="img/Dashb_Cluster.png" alt="CLUSTER dashboard" width="100%">
 
 </details>
 
@@ -180,7 +196,7 @@ The integration does not overwrite a dashboard that you have taken control of.
 <summary><b>PDM</b></summary>
 
 <br>
-<img src="https://github.com/Javisen/proxmox_sensors/raw/refs/heads/main/img/Dashb_PDM.png" alt="PDM dashboard" width="100%">
+<img src="img/Dashb_PDM.png" alt="PDM dashboard" width="100%">
 
 </details>
 
@@ -427,18 +443,64 @@ The integration provides backup orchestration directly from Home Assistant.
 
 ### 🔹 Via HACS (Recommended)
 
-[![Open your Home Assistant instance and open Proxmox Extended Sensors in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=Javisen&repository=proxmox_sensors&category=integration)
+[![Open your Home Assistant instance and open this fork in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=darthrater78&repository=proxmox_sensors&category=integration)
 
-**Proxmox Extended Sensors is available in the default HACS repository — no custom repository is required.**
+This fork is installed as a **HACS custom repository**. It uses the same integration domain as the upstream project, so remove the upstream download first; the two cannot be installed side by side.
 
-1. Open **HACS → Integrations**.
-2. Search for **Proxmox Extended Sensors**.
+1. Open **HACS → ⋮ → Custom repositories**, add `https://github.com/darthrater78/proxmox_sensors` with type **Integration**.
+2. Search for **Proxmox Extended Sensors** and open the entry from `darthrater78/proxmox_sensors`.
 3. Click **Download**.
 4. Restart Home Assistant.
 5. Go to **Settings → Devices & Services → Add Integration**.
 6. Search for **Proxmox Extended Sensors** and configure your PVE, PBS, CLUSTER and/or PDM connection.
 
 > The optional Proxmox Dashboard is installed separately. See [Dynamic Proxmox Dashboard](#-dynamic-proxmox-dashboard).
+
+---
+
+## 🔐 Security Architecture
+
+How this fork is built, and later changed, with regard to security. Every security fix updates this section.
+
+**Components and trust boundaries**
+
+- **Integration (Home Assistant).** Talks to the Proxmox VE / PBS / PDM HTTPS APIs with the credentials you enter. Home Assistant stores config-entry credentials in its own `.storage` directory; protect that directory and your Home Assistant backups like any other secret store.
+- **Sidecar (`pve-sensors-api.py`, optional).** A small service on each PVE node, port 9000, that exposes read-only hardware data (lm-sensors, SMART, memory modules, mounts, KSM). It runs as root because SMART and DMI reads need raw device access. Every endpoint is a fixed command with no client-controlled arguments, except `/smart-disk`, which accepts only an existing block device under `/dev`.
+
+**Sidecar security**
+
+- **HTTPS with a pinned certificate.** The installer generates a self-signed ECDSA P-256 certificate; Home Assistant pins its SHA-256 fingerprint (entered from the installer's output, not fetched over the network) and refuses to send anything to a different certificate. TLS 1.2 is the minimum.
+- **Token.** Every request carries a 256-bit random bearer token, compared in constant time. The sidecar refuses to start with a token but no TLS, or with a token in a config file readable by anyone but root.
+- **Allow-list, enforced twice.** Connections from addresses outside `ALLOWED_IPS` are dropped before the TLS handshake, and systemd's `IPAddressDeny=any` / `IPAddressAllow=` block them at the kernel too.
+- **Resource limits.** At most 8 requests are served at once (extra connections are refused, not queued), and a client has 15 seconds to complete the handshake and send its request.
+- **Sandbox.** The systemd unit sets `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `NoNewPrivileges`, kernel-module/log/cgroup protection, namespace and address-family restrictions; it keeps raw device access, which SMART needs.
+- **Verified installs.** The installer installs only a sidecar matching the release's `SHA256SUMS`.
+- **Legacy mode.** `--legacy-http` (plain HTTP, allow-list only) stays available for compatibility; Home Assistant flags such a sidecar with a repair warning.
+- **Errors stay on the node.** A failing endpoint answers with a fixed message such as `dmidecode failed`; exception text and command output, which can name devices and serial numbers, go only to the node's journal (`journalctl -u pve-sensors`).
+- **Sleeping disks stay asleep.** The SMART scan queries disks with `smartctl -n standby`, so a spun-down disk is reported as in standby, not woken; Home Assistant keeps that disk's last reading.
+
+**Transport security (Proxmox APIs)**
+
+- With **Verify SSL Certificate** on, certificates are checked against the system trust store (use this with ACME / Let's Encrypt certificates).
+- With it off (Proxmox's own self-signed certificates), the server certificate's **SHA-256 fingerprint is pinned**. During setup the fingerprint is shown for you to compare with the Proxmox web interface (Node → System → Certificates), and your password or token is sent only after you confirm. Every later request, including the password login itself, is refused unless the server presents that exact certificate. TLS 1.2 is the minimum.
+- Entries created before pinning existed pin the certificate they see on their next start and show a notification with the fingerprint to check.
+- If the certificate changes, or the password/token stops working, Home Assistant opens a **reauthentication** prompt that shows the old and new fingerprints; nothing is sent to the server until you accept.
+
+**Actions and services**
+
+- Node reboot and shutdown are **opt-in** (`enable_node_controls`, off unless you turn it on), for both the buttons and the `confirm_shutdown_node` / `confirm_reboot_node` services.
+- Every domain service that changes something (`create_vzdump_backup`, `backup_all`, `confirm_shutdown_node`, `confirm_reboot_node`, `wake_node`) requires a Home Assistant **administrator**, and validates its input (backup mode and compression from fixed lists, bounded concurrency and delays, strict MAC address format).
+
+**Supply chain**
+
+- Every GitHub Action is pinned to a commit SHA, except `hacs/action`: it is a Docker action that always runs HACS's moving `ghcr.io/hacs/action:main` image, so a commit pin would not fix the code that runs. Its CI job has read-only access, no secrets and no stored credentials; Dependabot keeps pins and Python dependencies current, and CodeQL, dependency review and a weekly `pip-audit` watch for vulnerabilities.
+- Each release attaches the sidecar and its installer with a `SHA256SUMS` file and a signed build-provenance attestation. Check a download with `gh attestation verify pve-sensors-api.py --repo darthrater78/proxmox_sensors`.
+- Releases are published only from tags on `main` whose commit passed CI and whose `manifest.json` version matches the tag.
+
+**Known limits**
+
+- The sidecar runs as root with raw device access; the sandbox narrows what it can touch, not the devices SMART needs.
+- `SHA256SUMS` comes from the same release as the files it covers, so it catches corrupted or swapped downloads but not a compromised release; `gh attestation verify` checks that the files were built by this repository's release workflow.
 
 ---
 
@@ -462,4 +524,4 @@ Please use the GitHub issue tracker for reproducible problems and include releva
 
 MIT License
 
-Copyright (c) Javisen
+Copyright (c) Javisen. Fork changes copyright (c) darthrater78, under the same license.

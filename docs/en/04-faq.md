@@ -52,10 +52,12 @@ Then check the sidecar:
 systemctl status pve-sensors.service
 ```
 
-And test:
+Then look at **Settings → Repairs** in Home Assistant. A sidecar that rejects the token, presents a different certificate, or still uses plain HTTP is reported there. Re-entering the token and fingerprint on the entry's **Reconfigure** page tests the connection to the sidecar before saving.
 
-```text
-http://YOUR_PROXMOX_IP:9000/sensors
+The sidecar logs every failure on the node:
+
+```bash
+journalctl -u pve-sensors.service -n 50
 ```
 
 See [01. Hardware Sensors and Sidecar Setup](01-install-sensors.md).

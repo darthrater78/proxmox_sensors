@@ -4,7 +4,7 @@
 Verifique acessibilidade, user/realm, token ativo, secret, permissões API e SSL. `Permission denied` costuma indicar permissões insuficientes.
 
 ## 🌡️ Hardware e Sidecar
-Se faltarem temperaturas: `sensors`, `systemctl status pve-sensors.service`, depois `http://IP_PROXMOX:9000/sensors`.
+Se faltarem temperaturas: `sensors`, depois `systemctl status pve-sensors.service`. Em seguida, consulte **Definições → Reparações** no Home Assistant: aí é indicado um Sidecar que rejeita o token, apresenta outro certificado ou ainda usa HTTP sem cifragem. O Sidecar regista os erros no nó: `journalctl -u pve-sensors.service -n 50`.
 
 **Sidecar Status** resume Memory, Mounts, Sensors e SMART (`ok`, `degraded`, `error`, `unknown`). V5 preserva quando possível os últimos valores válidos.
 

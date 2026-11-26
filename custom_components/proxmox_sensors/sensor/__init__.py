@@ -15,6 +15,7 @@ from .zfs import ProxmoxZFSPoolSensor
 from .memory import ProxmoxDimmSensor
 from .sensor_last_action import PBSLastActionSensor
 from ..const import DOMAIN, CONF_NODE, CONF_PLATFORM_TYPE
+from ..logic.entry_options import entry_option, monitored_pbs_datastores
 from ..logic.guest_cleanup import cleanup_excluded_guest_devices
 from ..logic.guest_migration_cleanup import setup_guest_migration_cleanup
 from ..logic.guest_deletion_cleanup import (
@@ -84,14 +85,6 @@ from .node import (
 
 from .cluster import (
     ProxmoxBackupJobsSensor,
-    ProxmoxClusterStatusSensor,
-    ProxmoxClusterNodesSensor,
-    ProxmoxClusterCPUSensor,
-    ProxmoxClusterRAMSensor,
-    ProxmoxClusterVMsSensor,
-    ProxmoxClusterCTsSensor,
-    ProxmoxClusterStorageSensor,
-    ProxmoxClusterHASensor,
 )
 
 # Hardware Sensors (lm-sensors)
@@ -929,10 +922,6 @@ async def async_setup_entry(
         "enable_lm_sensors", entry.data.get("enable_lm_sensors", True)
     )
 
-    enable_smart_monitoring = entry.options.get(
-        "enable_smart_monitoring", entry.data.get("enable_smart_monitoring", True)
-    )
-
     enable_node_controls = entry.options.get(
         "enable_node_controls", entry.data.get("enable_node_controls", False)
     )
@@ -947,10 +936,6 @@ async def async_setup_entry(
 
     enable_nodes_list = entry.options.get(
         "enable_nodes_list", entry.data.get("enable_nodes_list", True)
-    )
-
-    enable_cluster = entry.options.get(
-        "enable_cluster", entry.data.get("enable_cluster", True)
     )
 
     enable_guest_agent_metrics = entry.options.get(
@@ -1234,7 +1219,6 @@ async def async_setup_entry(
             is_shared = st.get("shared", 0) == 1
             storage_node = st.get("node")
             storage_path = st.get("path", "")
-            storage_type = st.get("type", "")
 
             # ---- SHARED (PBS, NFS, CIFS...) ----
             if is_shared:
@@ -1345,15 +1329,18 @@ async def async_setup_entry(
         cluster_context = cluster_guest_identity_context(
             entry, hass.config_entries.async_entries(DOMAIN), cluster_name
         )
-        entities.append(
-            ProxmoxClusterFirewallSensor(coordinator, cluster_name, entry.entry_id, cluster_context)
-        )
-        entities.append(ProxmoxBackupJobsSensor(coordinator, entry.entry_id, node))
-        if c_data.get("cluster_ha"):
+        if entry_option(entry, "enable_cluster_firewall", True):
+            entities.append(
+                ProxmoxClusterFirewallSensor(coordinator, cluster_name, entry.entry_id, cluster_context)
+            )
+        if entry_option(entry, "enable_cluster_backups", True):
+            entities.append(ProxmoxBackupJobsSensor(coordinator, entry.entry_id, node))
+            entities.append(ProxmoxBackupAgeSensor(coordinator, entry.entry_id, node))
+            entities.append(ProxmoxBackupHealthSensor(coordinator, entry.entry_id, node))
+        if c_data.get("cluster_ha") and entry_option(entry, "enable_cluster_ha", True):
             entities.append(ProxmoxClusterHASensor(coordinator, entry.entry_id, node))
-        entities.append(ProxmoxBackupAgeSensor(coordinator, entry.entry_id, node))
-        entities.append(ProxmoxBackupHealthSensor(coordinator, entry.entry_id, node))
-        entities.append(ProxmoxFailedTasksSensor(coordinator, entry.entry_id, node))
+        if entry_option(entry, "enable_cluster_failed_tasks", True):
+            entities.append(ProxmoxFailedTasksSensor(coordinator, entry.entry_id, node))
 
     # ==============PBS SECTION====================
     elif server_type == "PBS":
@@ -1372,8 +1359,8 @@ async def async_setup_entry(
         entities.append(ProxmoxPBSRamUsedSensor(coordinator, server_id))
         entities.append(ProxmoxPBSRamFreeSensor(coordinator, server_id))
 
-        # Datastores
-        for store_id in pbs_datastores:
+        # Datastores (minus any the user switched off in the options)
+        for store_id in monitored_pbs_datastores(entry, pbs_datastores):
 
             # Last Action
             entities.append(PBSLastActionSensor(coordinator, server_id, store_id))

@@ -16,7 +16,15 @@ class SmartCache:
     def accept(self, data, now):
         if not isinstance(data, dict) or "error" in data:
             return False
-        self.data = data
+        previous = self.data or {}
+        # The sidecar reports a spun-down disk instead of waking it; keep its
+        # last reading rather than showing it as a disk without SMART.
+        self.data = {
+            disk: previous[disk]
+            if isinstance(info, dict) and info.get("standby") and disk in previous
+            else info
+            for disk, info in data.items()
+        }
         self.last_refresh = now
         return True
 

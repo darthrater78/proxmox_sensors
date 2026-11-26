@@ -5,8 +5,7 @@ import math
 import time
 
 from homeassistant.const import PERCENTAGE, UnitOfInformation
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from homeassistant.components.sensor import SensorEntity, SensorStateClass
+from homeassistant.components.sensor import SensorStateClass
 from homeassistant.util import dt as dt_util
 
 from ..const import DOMAIN

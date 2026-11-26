@@ -4,7 +4,7 @@
 **Keine Verbindung:** Erreichbarkeit, User/Realm, aktiven Token, Secret, API-Rechte und SSL-Einstellungen prüfen. `Permission denied` weist meist auf fehlende Benutzer-/Tokenrechte oder Privilege Separation hin.
 
 ## 🌡️ Hardware und Sidecar
-Bei fehlenden Temperaturen zuerst `sensors`, dann `systemctl status pve-sensors.service` und `http://DEINE_PROXMOX_IP:9000/sensors` prüfen.
+Bei fehlenden Temperaturen zuerst `sensors`, dann `systemctl status pve-sensors.service` prüfen. Anschließend unter **Einstellungen → Reparaturen** in Home Assistant nachsehen: Ein Sidecar, der das Token ablehnt, ein anderes Zertifikat vorlegt oder noch unverschlüsseltes HTTP nutzt, wird dort gemeldet. Fehler protokolliert der Sidecar auf dem Node: `journalctl -u pve-sensors.service -n 50`.
 
 **Sidecar Status** fasst Memory, Mounts, Sensors und SMART zusammen (`ok`, `degraded`, `error`, `unknown`). Bei Ausfall bleiben letzte gültige Hardwarewerte nach Möglichkeit erhalten.
 

@@ -26,17 +26,22 @@ sensors
 
 ## 4. Установка Sidecar
 
-Выполните следующую команду на каждом хосте PVE/PBS, на котором вы хотите установить Hardware Sidecar:
+Выполните следующую команду от root на каждом узле PVE, где нужен Hardware Sidecar:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Javisen/proxmox_sensors/main/scripts/install-sidecar.sh)
+bash <(curl -fsSL https://github.com/darthrater78/proxmox_sensors/releases/latest/download/install-sidecar.sh)
 ```
 
-Во время установки вам будет предложено ввести IP-адрес или IP-адреса ваших экземпляров Home Assistant. Несколько IP-адресов можно указать через запятую.
+Во время установки потребуется ввести IP-адрес(а) ваших экземпляров Home Assistant. Несколько адресов можно указать через запятую. Только эти адреса смогут подключаться к Sidecar.
 
-Доступ к Hardware Sidecar будет разрешён только с указанных IP-адресов.
+Установщик загружает Sidecar из последнего релиза этого форка и устанавливает его, только если файл совпадает с `SHA256SUMS` релиза. Затем он создаёт самоподписанный сертификат и случайный токен и выводит оба значения:
 
-> **Примечание:** Если Sidecar уже установлен, выполните ту же команду ещё раз, чтобы обновить существующую установку и настроить разрешённые IP-адреса Home Assistant.
+- токен (**Sidecar token**)
+- отпечаток SHA-256 сертификата (**Sidecar certificate SHA-256**)
+
+Сохраните их для шага 6.
+
+> **Примечание:** Чтобы обновить существующую установку, выполните ту же команду ещё раз. Токен и сертификат сохраняются, поэтому Home Assistant продолжает работать; `--rotate-token` или `--rotate-cert` заменяют их.
 
 ## 5. Проверка Sidecar
 
@@ -46,9 +51,19 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Javisen/proxmox_sensors/main
 systemctl status pve-sensors.service
 ```
 
-Служба должна отображаться как `active (running)`.
+Служба должна отображаться как `active (running)`. Если это не так, причина видна в её журнале:
 
-## 6. При сбое
+```bash
+journalctl -u pve-sensors.service -n 50
+```
+
+## 6. Подключение Home Assistant к Sidecar
+
+Когда запись PVE для узла уже создана в Home Assistant (см. [03. Настройка Home Assistant](03-login-pve-pbs.md)), откройте **Настройки → Устройства и службы → Proxmox Extended Sensors**, выберите запись узла и затем **⋮ → Перенастроить**. Введите **Sidecar token** и **Sidecar certificate SHA-256** из шага 4.
+
+Home Assistant проверяет их на Sidecar перед сохранением. После этого он отправляет запросы только на этот сертификат и вместе с токеном. Пока они не введены, аппаратные датчики узла недоступны.
+
+## 7. При сбое
 V5 по возможности сохраняет последние корректные аппаратные значения. **Sidecar Status** показывает Memory, Mounts, Sensors и SMART как `ok`, `degraded`, `error` или `unknown`.
 
 Далее: [02. Пользователь и права Proxmox](02-proxmox-config.md)

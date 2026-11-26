@@ -16,14 +16,22 @@ from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 import homeassistant.helpers.config_validation as cv
+from homeassistant.helpers.selector import (
+    TextSelector,
+    TextSelectorConfig,
+    TextSelectorType,
+)
 from homeassistant.helpers.translation import async_get_translations
 from homeassistant.helpers import entity_registry as er, device_registry as dr
 
 from .api import (
     AuthenticationError,
     CannotConnect,
+    CertificateMismatchError,
     PermissionError as ProxmoxPermissionError,
     ProxmoxClient,
+    SidecarAuthError,
+    SidecarCertificateError,
 )
 from .const import (
     DOMAIN,
@@ -35,7 +43,17 @@ from .const import (
     CONF_NODE,
     CONF_PLATFORM_TYPE,
     CONF_VERIFY_SSL,
+    CONF_CERT_FINGERPRINT,
+    CONF_SIDECAR_FINGERPRINT,
+    CONF_SIDECAR_TOKEN,
     PDM_IDENTITY_ID,
+)
+from .tls import (
+    DEFAULT_PORTS,
+    CertificateNotPinned,
+    display_fingerprint,
+    fetch_certificate_fingerprint,
+    normalize_fingerprint,
 )
 from .pbs_identity import (
     async_remember_pbs_identity,
@@ -70,6 +88,14 @@ PDM_EXTRA_ENDPOINTS = [
     "resources/subscription",
     "remotes/updates/summary",
 ]
+
+_VALIDATION_ENDPOINTS = {
+    "PVE": (PVE_MIN_ENDPOINTS, PVE_EXTRA_ENDPOINTS),
+    "CLUSTER": (PVE_MIN_ENDPOINTS, PVE_EXTRA_ENDPOINTS),
+    "PBS": (PBS_MIN_ENDPOINTS, PBS_EXTRA_ENDPOINTS),
+    "PDM": (PDM_MIN_ENDPOINTS, PDM_EXTRA_ENDPOINTS),
+}
+_SECRET = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
 
 _HOST_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
 
@@ -203,6 +229,50 @@ def _equivalent_config_entry(data, entries) -> bool:
     return False
 
 
+def _connection_error_key(err: Exception, purpose: str) -> str:
+    """The form error for a failed connection check (unexpected errors are logged)."""
+    # CertificateMismatchError subclasses AuthenticationError, so it goes first.
+    if isinstance(err, CertificateMismatchError):
+        return "certificate_changed"
+    if isinstance(err, AuthenticationError):
+        return "invalid_auth"
+    if isinstance(err, ProxmoxPermissionError):
+        return "insufficient_permissions"
+    if isinstance(err, (CannotConnect, CertificateNotPinned)):
+        return "cannot_connect"
+    _LOGGER.error("Unexpected error during %s", purpose, exc_info=err)
+    return "unknown"
+
+
+def _reauth_secret_key(data, platform) -> str:
+    """Which secret the reauth form asks for: the token secret, or the password."""
+    if data.get(CONF_TOKEN_SECRET) or platform in ("PBS", "PDM"):
+        return CONF_TOKEN_SECRET
+    return CONF_PASSWORD
+
+
+def _reconfigure_schema(data, platform) -> vol.Schema:
+    """The reconfigure form, prefilled from the stored entry (secrets left blank)."""
+    schema = {
+        vol.Required(CONF_HOST, default=data.get(CONF_HOST, "")): str,
+        vol.Required(CONF_USER, default=data.get(CONF_USER, "")): str,
+    }
+    if platform not in ("PBS", "PDM"):
+        schema[vol.Required("use_token", default=bool(data.get(CONF_TOKEN_ID)))] = bool
+        schema[vol.Optional(CONF_PASSWORD)] = _SECRET
+    schema[vol.Optional(CONF_TOKEN_ID, default=data.get(CONF_TOKEN_ID) or "")] = str
+    schema[vol.Optional(CONF_TOKEN_SECRET)] = _SECRET
+    schema[vol.Optional(CONF_VERIFY_SSL, default=data.get(CONF_VERIFY_SSL, False))] = bool
+    if platform == "PVE":
+        stored = normalize_fingerprint(data.get(CONF_SIDECAR_FINGERPRINT))
+        schema[vol.Optional(CONF_SIDECAR_TOKEN)] = _SECRET
+        schema[vol.Optional(
+            CONF_SIDECAR_FINGERPRINT,
+            default=display_fingerprint(stored) if stored else "",
+        )] = str
+    return vol.Schema(schema)
+
+
 class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     VERSION = 3
@@ -313,11 +383,18 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             self._config.update(user_input)
+            confirm = await self._ensure_certificate("credentials_pve", user_input)
+            if confirm is not None:
+                return confirm
             client = self._build_client("PVE")
             try:
                 validation = await self._validate_connection(
                     client, PVE_MIN_ENDPOINTS, PVE_EXTRA_ENDPOINTS
                 )
+            except CertificateMismatchError:
+                errors["base"] = "certificate_changed"
+            except CertificateNotPinned:
+                errors["base"] = "cannot_connect"
             except AuthenticationError as err:
                 _LOGGER.debug(
                     "PVE credential validation failed with %s: %s",
@@ -370,11 +447,18 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             self._config.update(user_input)
+            confirm = await self._ensure_certificate("credentials_pbs", user_input)
+            if confirm is not None:
+                return confirm
             client = self._build_client("PBS")
             try:
                 validation = await self._validate_connection(
                     client, PBS_MIN_ENDPOINTS, PBS_EXTRA_ENDPOINTS
                 )
+            except CertificateMismatchError:
+                errors["base"] = "certificate_changed"
+            except CertificateNotPinned:
+                errors["base"] = "cannot_connect"
             except AuthenticationError as err:
                 _LOGGER.debug(
                     "PBS credential validation failed with %s: %s",
@@ -433,11 +517,18 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         }
         if user_input is not None:
             self._config.update(user_input)
+            confirm = await self._ensure_certificate("credentials_pdm", user_input)
+            if confirm is not None:
+                return confirm
             client = self._build_client("PDM")
             try:
                 validation = await self._validate_connection(
                     client, PDM_MIN_ENDPOINTS, PDM_EXTRA_ENDPOINTS
                 )
+            except CertificateMismatchError:
+                errors["base"] = "certificate_changed"
+            except CertificateNotPinned:
+                errors["base"] = "cannot_connect"
             except AuthenticationError:
                 errors["base"] = "invalid_auth"
             except ProxmoxPermissionError:
@@ -480,11 +571,18 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             self._config.update(user_input)
+            confirm = await self._ensure_certificate("credentials_cluster", user_input)
+            if confirm is not None:
+                return confirm
             client = self._build_client("PVE")
             try:
                 validation = await self._validate_connection(
                     client, PVE_MIN_ENDPOINTS, PVE_EXTRA_ENDPOINTS
                 )
+            except CertificateMismatchError:
+                errors["base"] = "certificate_changed"
+            except CertificateNotPinned:
+                errors["base"] = "cannot_connect"
             except AuthenticationError as err:
                 _LOGGER.debug(
                     "Cluster credential validation failed with %s: %s",
@@ -534,7 +632,291 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             token_secret=self._config.get(CONF_TOKEN_SECRET),
             server_type=server_type,
             verify_ssl=self._config.get(CONF_VERIFY_SSL, False),
+            cert_fingerprint=self._config.get(CONF_CERT_FINGERPRINT),
+            sidecar_token=self._config.get(CONF_SIDECAR_TOKEN),
+            sidecar_fingerprint=self._config.get(CONF_SIDECAR_FINGERPRINT),
         )
+
+    # ===== CERTIFICATE PINNING ================================
+
+    async def _ensure_certificate(self, step_id, user_input):
+        """Ask the user to confirm the server certificate before sending credentials.
+
+        Returns the confirmation form, or None when verification is on or the
+        fingerprint for this host was already confirmed. If the certificate
+        cannot be read, None is returned without a fingerprint and the
+        client refuses to connect (CertificateNotPinned -> cannot_connect).
+        """
+        if self._config.get(CONF_VERIFY_SSL, False):
+            self._config.pop(CONF_CERT_FINGERPRINT, None)
+            return None
+        if normalize_fingerprint(self._config.get(CONF_CERT_FINGERPRINT)):
+            return None
+        platform = str(self._config.get(CONF_PLATFORM_TYPE) or "PVE").upper()
+        try:
+            fingerprint = await self.hass.async_add_executor_job(
+                fetch_certificate_fingerprint,
+                self._config[CONF_HOST],
+                DEFAULT_PORTS.get(platform, 8006),
+            )
+        except OSError as err:
+            _LOGGER.debug("Unable to read certificate of %s: %s", self._config[CONF_HOST], err)
+            return None
+        self._pending_certificate = (fingerprint, step_id, dict(user_input))
+        return await self.async_step_confirm_certificate()
+
+    async def async_step_confirm_certificate(self, user_input=None) -> FlowResult:
+        fingerprint, step_id, saved_input = self._pending_certificate
+        if user_input is not None:
+            if not user_input.get("confirm", False):
+                return self.async_abort(reason="certificate_rejected")
+            self._config[CONF_CERT_FINGERPRINT] = fingerprint
+            self._confirmed_certificate = (self._config[CONF_HOST], fingerprint)
+            return await getattr(self, f"async_step_{step_id}")(saved_input)
+        return self.async_show_form(
+            step_id="confirm_certificate",
+            data_schema=vol.Schema({vol.Required("confirm", default=False): bool}),
+            description_placeholders={
+                "host": self._config[CONF_HOST],
+                "fingerprint": display_fingerprint(fingerprint),
+            },
+        )
+
+    # ===== REAUTH ============================================
+
+    async def async_step_reauth(self, entry_data) -> FlowResult:
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(self, user_input=None) -> FlowResult:
+        """Re-enter a rotated secret and/or review a changed pinned certificate."""
+        entry = self._get_reauth_entry()
+        data = dict(entry.data)
+        platform = _config_entry_platform(data)
+        secret_key = _reauth_secret_key(data, platform)
+        stored = normalize_fingerprint(data.get(CONF_CERT_FINGERPRINT))
+        current, error = await self._presented_fingerprint(data, platform)
+        changed = current is not None and current != stored
+
+        if user_input is not None and not error:
+            if changed and not user_input.get("accept_certificate", False):
+                error = "certificate_not_accepted"
+            else:
+                updates = {secret_key: user_input[secret_key]} if user_input.get(secret_key) else {}
+                if current is not None:
+                    updates[CONF_CERT_FINGERPRINT] = current
+                error = await self._reauth_check({**data, **updates}, platform)
+                if error is None:
+                    return self.async_update_reload_and_abort(entry, data_updates=updates)
+
+        schema = {vol.Optional(secret_key): _SECRET}
+        if changed:
+            schema[vol.Required("accept_certificate", default=False)] = bool
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=vol.Schema(schema),
+            errors={"base": error} if error else {},
+            description_placeholders={
+                "title": entry.title,
+                "host": data[CONF_HOST],
+                "old_fingerprint": display_fingerprint(stored) if stored else "-",
+                "new_fingerprint": display_fingerprint(current) if current else "-",
+            },
+        )
+
+    async def _presented_fingerprint(self, data, platform):
+        """(fingerprint the server presents now, error key); (None, None) when verification is on."""
+        if data.get(CONF_VERIFY_SSL, False):
+            return None, None
+        try:
+            fingerprint = await self.hass.async_add_executor_job(
+                fetch_certificate_fingerprint, data[CONF_HOST], DEFAULT_PORTS.get(platform, 8006)
+            )
+        except OSError:
+            return None, "cannot_connect"
+        return fingerprint, None
+
+    async def _reauth_check(self, candidate, platform):
+        """Validate the updated credentials; returns an error key, or None when they work."""
+        self._config = candidate
+        client = self._build_client("PVE" if platform in ("PVE", "CLUSTER") else platform)
+        try:
+            validation = await self._validate_connection(
+                client, *_VALIDATION_ENDPOINTS.get(platform, _VALIDATION_ENDPOINTS["PVE"])
+            )
+        except Exception as err:  # noqa: BLE001 - every failure becomes a form error
+            return _connection_error_key(err, "reauthentication")
+        return None if validation["has_minimum"] else "insufficient_permissions"
+
+    # ===== RECONFIGURE =======================================
+
+    async def async_step_reconfigure(self, user_input=None) -> FlowResult:
+        """Change connection settings in place.
+
+        Server type and PVE node stay fixed: they define the entity IDs and
+        history, so changing them really means adding a different device.
+        Blank secret fields keep the stored secret.
+        """
+        entry = self._get_reconfigure_entry()
+        data = dict(entry.data)
+        platform = _config_entry_platform(data)
+        errors = {}
+
+        if user_input is not None:
+            result, errors = await self._reconfigure_submit(entry, data, platform, user_input)
+            if result is not None:
+                return result
+
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=_reconfigure_schema(data, platform),
+            errors=errors,
+            description_placeholders={"title": entry.title},
+        )
+
+    async def _reconfigure_submit(self, entry, data, platform, user_input):
+        """Check and save the form: (flow result to return, or None; form errors)."""
+        host = str(user_input.get(CONF_HOST, "")).strip()
+        if host_error := _config_host_error(host, platform):
+            return None, {CONF_HOST: host_error}
+        candidate, error = self._reconfigure_candidate(
+            data, user_input, host, platform in ("PBS", "PDM")
+        )
+        if not error and platform == "PVE":
+            error = self._sidecar_candidate(candidate, data, user_input)
+        if error:
+            return None, {"base": error}
+        self._config = candidate
+        confirm = await self._ensure_certificate("reconfigure", user_input)
+        if confirm is not None:
+            return confirm, {}
+        result = await self._finish_reconfigure(entry, platform)
+        if isinstance(result, str):
+            return None, {"base": result}
+        return result, {}
+
+    def _reconfigure_candidate(self, data, user_input, host, token_only):
+        """Merge the form into the stored data; returns (candidate, error_key)."""
+        candidate = {
+            **data,
+            CONF_HOST: host,
+            CONF_USER: str(user_input.get(CONF_USER, "")).strip(),
+            CONF_VERIFY_SSL: bool(user_input.get(CONF_VERIFY_SSL, False)),
+        }
+        if token_only or user_input.get("use_token"):
+            candidate[CONF_TOKEN_ID] = user_input.get(CONF_TOKEN_ID) or data.get(CONF_TOKEN_ID)
+            candidate[CONF_TOKEN_SECRET] = (
+                user_input.get(CONF_TOKEN_SECRET) or data.get(CONF_TOKEN_SECRET)
+            )
+            candidate.pop(CONF_PASSWORD, None)
+            if not candidate[CONF_TOKEN_ID] or not candidate[CONF_TOKEN_SECRET]:
+                return candidate, "secret_required"
+        else:
+            candidate[CONF_PASSWORD] = user_input.get(CONF_PASSWORD) or data.get(CONF_PASSWORD)
+            candidate.pop(CONF_TOKEN_ID, None)
+            candidate.pop(CONF_TOKEN_SECRET, None)
+            if not candidate[CONF_PASSWORD]:
+                return candidate, "secret_required"
+        if candidate[CONF_VERIFY_SSL]:
+            candidate.pop(CONF_CERT_FINGERPRINT, None)
+        elif _normalized_config_host(host) != _normalized_config_host(data.get(CONF_HOST)):
+            # A different host must have its certificate confirmed again,
+            # unless the user just confirmed it in this flow.
+            confirmed = getattr(self, "_confirmed_certificate", None)
+            if confirmed and confirmed[0] == host:
+                candidate[CONF_CERT_FINGERPRINT] = confirmed[1]
+            else:
+                candidate.pop(CONF_CERT_FINGERPRINT, None)
+        return candidate, None
+
+    def _sidecar_candidate(self, candidate, data, user_input):
+        """Apply the sidecar fields; returns an error key or None.
+
+        An empty fingerprint field means the sidecar runs in legacy plain-HTTP
+        mode (or not at all), so the stored token is dropped with it. A blank
+        token field keeps the stored token.
+        """
+        raw_fp = str(user_input.get(CONF_SIDECAR_FINGERPRINT) or "").strip()
+        typed_token = str(user_input.get(CONF_SIDECAR_TOKEN) or "").strip()
+        if not raw_fp:
+            if typed_token:
+                return "sidecar_fingerprint_required"
+            candidate.pop(CONF_SIDECAR_TOKEN, None)
+            candidate.pop(CONF_SIDECAR_FINGERPRINT, None)
+            return None
+        fingerprint = normalize_fingerprint(raw_fp.rsplit("=", 1)[-1])
+        if fingerprint is None:
+            return "invalid_sidecar_fingerprint"
+        token = typed_token or data.get(CONF_SIDECAR_TOKEN)
+        if not token:
+            return "sidecar_token_required"
+        candidate[CONF_SIDECAR_TOKEN] = token
+        candidate[CONF_SIDECAR_FINGERPRINT] = fingerprint
+        return None
+
+    async def _check_sidecar(self, client, entry):
+        """Test changed sidecar settings against the sidecar; returns an error key or None."""
+        keys = (CONF_HOST, CONF_SIDECAR_TOKEN, CONF_SIDECAR_FINGERPRINT)
+        if not self._config.get(CONF_SIDECAR_TOKEN) or all(
+            self._config.get(key) == entry.data.get(key) for key in keys
+        ):
+            return None
+        try:
+            await client.check_sidecar(self.hass)
+        except SidecarCertificateError:
+            return "sidecar_certificate_changed"
+        except SidecarAuthError:
+            return "sidecar_auth_failed"
+        except Exception as err:  # connection refused, TLS error, bad JSON...
+            _LOGGER.debug("Sidecar check on %s failed: %s", self._config[CONF_HOST], err)
+            return "sidecar_cannot_connect"
+        return None
+
+    async def _finish_reconfigure(self, entry, platform):
+        """Validate the candidate against the same server; abort/save, or an error key."""
+        client = self._build_client("PVE" if platform in ("PVE", "CLUSTER") else platform)
+        try:
+            validation = await self._validate_connection(
+                client, *_VALIDATION_ENDPOINTS.get(platform, _VALIDATION_ENDPOINTS["PVE"])
+            )
+            identity_error = (
+                await self._reconfigure_identity_error(client, entry, platform)
+                if validation["has_minimum"] else None
+            )
+        except Exception as err:  # noqa: BLE001 - every failure becomes a form error
+            return _connection_error_key(err, "reconfiguration")
+        if not validation["has_minimum"]:
+            return "insufficient_permissions"
+        if identity_error:
+            return identity_error
+        if platform == "PVE" and (sidecar_error := await self._check_sidecar(client, entry)):
+            return sidecar_error
+
+        unique_id = _config_entry_unique_id(self._config) or entry.unique_id
+        if unique_id != entry.unique_id and any(
+            other.entry_id != entry.entry_id and other.unique_id == unique_id
+            for other in self.hass.config_entries.async_entries(DOMAIN)
+        ):
+            return self.async_abort(reason="already_configured")
+        return self.async_update_reload_and_abort(
+            entry, unique_id=unique_id, data=self._config
+        )
+
+    async def _reconfigure_identity_error(self, client, entry, platform):
+        """Refuse to point an entry at a different machine than it represents."""
+        data = entry.data
+        if platform == "PVE":
+            nodes = await client.get(self.hass, "nodes", raise_errors=True) or []
+            names = {str(node.get("node")) for node in nodes if isinstance(node, dict)}
+            return None if data.get(CONF_NODE) in names else "node_not_found"
+        if platform == "PBS" and data.get("pbs_instance_id"):
+            instance_id = await client.get_pbs_instance_id(self.hass)
+            if instance_id and instance_id != data["pbs_instance_id"]:
+                return "different_server"
+        if platform == "CLUSTER" and data.get("cluster_name"):
+            status = await client.get_cluster_status(self.hass, raise_errors=True)
+            if status.get("name") and status["name"] != data["cluster_name"]:
+                return "different_server"
+        return None
 
     async def _validate_connection(
         self,
@@ -597,15 +979,7 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def async_step_select_node(self, user_input=None) -> FlowResult:
 
-        client = ProxmoxClient(
-            host=self._config[CONF_HOST],
-            user=self._config[CONF_USER],
-            password=self._config.get(CONF_PASSWORD),
-            token_id=self._config.get(CONF_TOKEN_ID),
-            token_secret=self._config.get(CONF_TOKEN_SECRET),
-            server_type="PVE",
-            verify_ssl=self._config.get(CONF_VERIFY_SSL, False),
-        )
+        client = self._build_client("PVE")
 
         try:
             resources = await client.get_cluster_resources(self.hass)
@@ -628,7 +1002,8 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         if ip == host_ip:
                             self._config[CONF_NODE] = node_name
                             return await self.async_step_select_resources()
-                    except Exception:
+                    except Exception as err:  # noqa: BLE001 - one unreachable node must not end setup
+                        _LOGGER.debug("Could not read the IP of node %s: %s", node_name, err)
                         continue
 
             # Manual mode
@@ -652,8 +1027,8 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             if addr and not addr.startswith("127.") and ":" not in addr:
                                 ip = addr
                                 break
-                except Exception:
-                    pass
+                except Exception as err:  # noqa: BLE001 - the IP is only a label here
+                    _LOGGER.debug("Could not read the network of node %s: %s", node_name, err)
                 node_options[node_name] = f"{node_name} ({ip})" if ip else node_name
 
             if len(node_options) == 1:
@@ -692,15 +1067,7 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
             return await self._finish()
 
-        client = ProxmoxClient(
-            host=self._config[CONF_HOST],
-            user=self._config[CONF_USER],
-            password=self._config.get(CONF_PASSWORD),
-            token_id=self._config.get(CONF_TOKEN_ID),
-            token_secret=self._config.get(CONF_TOKEN_SECRET),
-            server_type="PVE",
-            verify_ssl=self._config.get(CONF_VERIFY_SSL, False),
-        )
+        client = self._build_client("PVE")
 
         node = self._config[CONF_NODE]
 
@@ -926,15 +1293,7 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
 
             try:
-                client = ProxmoxClient(
-                    host=self._config[CONF_HOST],
-                    user=self._config[CONF_USER],
-                    password=self._config.get(CONF_PASSWORD),
-                    token_id=self._config.get(CONF_TOKEN_ID),
-                    token_secret=self._config.get(CONF_TOKEN_SECRET),
-                    server_type="PBS",
-                    verify_ssl=self._config.get(CONF_VERIFY_SSL, False),
-                )
+                client = self._build_client("PBS")
 
                 hostname = await client.get_pbs_hostname(self.hass)
 
@@ -963,15 +1322,7 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._config["server_id"] = f"cluster_{self._config[CONF_HOST]}"
 
             try:
-                client = ProxmoxClient(
-                    host=self._config[CONF_HOST],
-                    user=self._config[CONF_USER],
-                    password=self._config.get(CONF_PASSWORD),
-                    token_id=self._config.get(CONF_TOKEN_ID),
-                    token_secret=self._config.get(CONF_TOKEN_SECRET),
-                    server_type="PVE",
-                    verify_ssl=self._config.get(CONF_VERIFY_SSL, False),
-                )
+                client = self._build_client("PVE")
 
                 status = await client.get_cluster_status(self.hass)
                 cluster_name = status.get("name")
@@ -980,8 +1331,8 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     self._config["cluster_name"] = cluster_name
                     title_name = cluster_name
 
-            except Exception:
-                pass
+            except Exception as err:  # noqa: BLE001 - falls back to the host as the title
+                _LOGGER.debug("Could not read the cluster name from %s: %s", self._config[CONF_HOST], err)
 
             if not title_name:
                 title_name = self._config.get(CONF_HOST)

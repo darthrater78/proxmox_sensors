@@ -20,7 +20,7 @@ Normalmente significa que las credenciales son válidas, pero la cuenta o el tok
 
 ### No aparecen las temperaturas
 
-Comprueba `sensors`, después `systemctl status pve-sensors.service` y finalmente `http://IP_DE_TU_PROXMOX:9000/sensors`. Consulta [01. Configuración de sensores de hardware y Sidecar](01-install-sensors.md).
+Comprueba `sensors` y después `systemctl status pve-sensors.service`. Luego revisa **Ajustes → Reparaciones** en Home Assistant: allí se avisa si el Sidecar rechaza el token, presenta otro certificado o sigue usando HTTP sin cifrar. El Sidecar registra los fallos en el nodo: `journalctl -u pve-sensors.service -n 50`. Consulta [01. Configuración de sensores de hardware y Sidecar](01-install-sensors.md).
 
 ### ¿Qué significa `Sidecar Status`?
 
