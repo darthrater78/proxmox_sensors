@@ -493,7 +493,7 @@ How this fork is built, and later changed, with regard to security. Every securi
 
 **Supply chain**
 
-- Every GitHub Action is pinned to a commit SHA (except `hacs/action`, which HACS requires unpinned); Dependabot keeps pins and Python dependencies current, and CodeQL, dependency review and a weekly `pip-audit` watch for vulnerabilities.
+- Every GitHub Action is pinned to a commit SHA, except `hacs/action`: it is a Docker action that always runs HACS's moving `ghcr.io/hacs/action:main` image, so a commit pin would not fix the code that runs. Its CI job has read-only access, no secrets and no stored credentials; Dependabot keeps pins and Python dependencies current, and CodeQL, dependency review and a weekly `pip-audit` watch for vulnerabilities.
 - Each release attaches the sidecar and its installer with a `SHA256SUMS` file and a signed build-provenance attestation. Check a download with `gh attestation verify pve-sensors-api.py --repo darthrater78/proxmox_sensors`.
 - Releases are published only from tags on `main` whose commit passed CI and whose `manifest.json` version matches the tag.
 
