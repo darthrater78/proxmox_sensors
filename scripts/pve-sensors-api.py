@@ -1,6 +1,20 @@
 #!/usr/bin/env python3
+"""Proxmox Extended Sensors hardware sidecar.
+
+Serves read-only hardware data (lm-sensors, SMART, memory modules, mounts,
+KSM) to Home Assistant. Configuration: /etc/proxmox-sensors/sidecar.conf
+
+Secure mode (the installer's default): HTTPS with a self-signed certificate
+that Home Assistant pins, plus a bearer token, plus the client IP allow-list.
+Compatibility mode (no TOKEN in the config): plain HTTP with the IP allow-list
+only, for integrations older than the fork's sidecar support.
+"""
+import hmac
 import json
 import os
+import socket
+import ssl
+import sys
 import subprocess
 import re
 import hashlib
@@ -17,32 +31,85 @@ from urllib.parse import parse_qs, urlsplit
 CONFIG_PATH = "/etc/proxmox-sensors/sidecar.conf"
 
 
-def load_allowed_ips():
-    """Load and validate the allowed client IP list from the sidecar config."""
-    if not os.path.exists(CONFIG_PATH):
-        raise RuntimeError(f"Missing sidecar configuration: {CONFIG_PATH}")
+DEFAULT_PORT = 9000
+MAX_CONCURRENT_REQUESTS = 8
+REQUEST_TIMEOUT = 15  # seconds a client may take to send its request
+MIN_TOKEN_LENGTH = 32
+
+
+class SidecarConfig:
+    """Validated sidecar settings."""
+
+    def __init__(self, allowed_ips, token=None, cert=None, key=None,
+                 bind="0.0.0.0", port=DEFAULT_PORT):
+        self.allowed_ips = frozenset(allowed_ips)
+        self.token = token
+        self.cert = cert
+        self.key = key
+        self.bind = bind
+        self.port = port
+
+    @property
+    def secure(self):
+        return self.token is not None
+
+
+def parse_config(text):
+    """Parse KEY=VALUE lines into a SidecarConfig; raises RuntimeError."""
+    values = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip().strip("\"'")
 
     allowed = []
-    with open(CONFIG_PATH, "r", encoding="utf-8") as config_file:
-        for raw_line in config_file:
-            line = raw_line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            if key.strip() == "ALLOWED_IPS":
-                for item in value.split(","):
-                    candidate = item.strip()
-                    if not candidate:
-                        continue
-                    allowed.append(str(ipaddress.ip_address(candidate)))
-
+    for item in values.get("ALLOWED_IPS", "").split(","):
+        candidate = item.strip()
+        if candidate:
+            try:
+                allowed.append(str(ipaddress.ip_address(candidate)))
+            except ValueError as err:
+                raise RuntimeError(f"Invalid address in ALLOWED_IPS: {candidate!r}") from err
     if not allowed:
         raise RuntimeError("ALLOWED_IPS is missing or empty")
 
-    return frozenset(allowed)
+    token = values.get("TOKEN") or None
+    cert = values.get("TLS_CERT") or None
+    key = values.get("TLS_KEY") or None
+    if token is not None:
+        if len(token) < MIN_TOKEN_LENGTH:
+            raise RuntimeError(f"TOKEN must be at least {MIN_TOKEN_LENGTH} characters")
+        if not cert or not key:
+            # A token sent over plain HTTP could be read by anyone on the path.
+            raise RuntimeError("TOKEN requires TLS_CERT and TLS_KEY")
+    elif cert or key:
+        raise RuntimeError("TLS_CERT/TLS_KEY are set without TOKEN; add TOKEN or remove them")
+
+    try:
+        port = int(values.get("PORT", DEFAULT_PORT))
+    except ValueError as err:
+        raise RuntimeError("PORT must be a number") from err
+    if not 1 <= port <= 65535:
+        raise RuntimeError("PORT must be between 1 and 65535")
+    bind = values.get("BIND", "0.0.0.0")
+    try:
+        bind = str(ipaddress.IPv4Address(bind))
+    except ValueError as err:
+        raise RuntimeError("BIND must be an IPv4 address") from err
+    return SidecarConfig(allowed, token, cert, key, bind, port)
 
 
-ALLOWED_IPS = load_allowed_ips()
+def load_config(path=CONFIG_PATH):
+    """Load the config file, refusing one that others can read when it holds a token."""
+    if not os.path.exists(path):
+        raise RuntimeError(f"Missing sidecar configuration: {path}")
+    with open(path, "r", encoding="utf-8") as config_file:
+        config = parse_config(config_file.read())
+    if config.secure and os.stat(path).st_mode & 0o077:
+        raise RuntimeError(f"{path} holds the token and must not be readable by others (chmod 600)")
+    return config
 
 STORCLI_CANDIDATES = (
     "storcli64", "storcli", "/opt/MegaRAID/storcli/storcli64",
@@ -158,20 +225,43 @@ def _cached_hba_temps():
 
 
 class Handler(BaseHTTPRequestHandler):
+    server_version = "PVESensors"
+    sys_version = ""
+    timeout = REQUEST_TIMEOUT
+
     def _client_is_allowed(self):
-        return self.client_address[0] in ALLOWED_IPS
+        return self.server.client_is_allowed(self.client_address[0])
+
+    def _token_is_valid(self):
+        token = self.server.config.token
+        if token is None:
+            return True
+        header = self.headers.get("Authorization", "")
+        scheme, _, supplied = header.partition(" ")
+        return scheme.lower() == "bearer" and hmac.compare_digest(
+            supplied.strip().encode(), token.encode()
+        )
+
+    def _send_status_json(self, code, error, extra_headers=()):
+        payload = json.dumps({"error": error}).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "no-store")
+        for name, value in extra_headers:
+            self.send_header(name, value)
+        self.end_headers()
+        self.wfile.write(payload)
 
     def _send_forbidden(self):
-        payload = json.dumps({"error": "forbidden"})
-        self.send_response(403)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload.encode())))
-        self.end_headers()
-        self.wfile.write(payload.encode())
+        self._send_status_json(403, "forbidden")
 
     def do_GET(self):
         if not self._client_is_allowed():
             self._send_forbidden()
+            return
+        if not self._token_is_valid():
+            self._send_status_json(401, "unauthorized", (("WWW-Authenticate", "Bearer"),))
             return
         if self.path == "/sensors":
             self._handle_sensors()
@@ -190,8 +280,7 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/ksm":
             self._handle_ksm()
         else:
-            self.send_response(404)
-            self.end_headers()
+            self._send_status_json(404, "not found")
 
     def _handle_sensors(self):
         """Handle lm-sensors data."""
@@ -1073,30 +1162,105 @@ class Handler(BaseHTTPRequestHandler):
             return {"working": 0, "failed": 0, "total": 0}
 
     def _send_json_response(self, data):
+        body = data if isinstance(data, bytes) else data.encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        if isinstance(data, bytes):
-            self.wfile.write(data)
-        else:
-            self.wfile.write(data.encode())
+        self.wfile.write(body)
 
     def _send_error_response(self, message):
-        error_data = json.dumps({"error": message})
-        self.send_response(500)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(error_data.encode())
+        self._send_status_json(500, message)
 
     def log_message(self, format, *args):
         pass
 
 
+class SidecarServer(ThreadingHTTPServer):
+    """HTTP(S) server with an IP check before TLS and a cap on busy threads."""
+
+    daemon_threads = True
+    request_queue_size = 16
+
+    def __init__(self, config, handler=None, ssl_context=None):
+        self.config = config
+        self.ssl_context = ssl_context
+        self._slots = threading.BoundedSemaphore(MAX_CONCURRENT_REQUESTS)
+        super().__init__((config.bind, config.port), handler or Handler)
+
+    def client_is_allowed(self, address):
+        try:
+            address = ipaddress.ip_address(address)
+        except ValueError:
+            return False
+        mapped = getattr(address, "ipv4_mapped", None)
+        return str(mapped or address) in self.config.allowed_ips
+
+    def verify_request(self, request, client_address):
+        # Drop unknown clients before spending a TLS handshake or a thread.
+        return self.client_is_allowed(client_address[0])
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            # Busy: refuse instead of queueing unbounded threads.
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+    def finish_request(self, request, client_address):
+        request.settimeout(REQUEST_TIMEOUT)
+        if self.ssl_context is None:
+            super().finish_request(request, client_address)
+            return
+        try:
+            # The handshake runs here, in the request's own thread, under the
+            # socket timeout, so a stalled client cannot block the listener.
+            tls = self.ssl_context.wrap_socket(request, server_side=True)
+        except (ssl.SSLError, OSError):
+            return
+        try:
+            super().finish_request(tls, client_address)
+        finally:
+            try:
+                tls.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            tls.close()
+
+
+def build_ssl_context(config):
+    if not config.secure:
+        return None
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(config.cert, config.key)
+    return context
+
+
 def main():
-    port = 9000
-    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
-    print(f"PVE Sensors API v2 started on port {port}")
-    print(f"Allowed client IPs: {', '.join(sorted(ALLOWED_IPS))}")
+    try:
+        config = load_config()
+    except (RuntimeError, OSError) as err:
+        print(f"PVE Sensors API: {err}", file=sys.stderr)
+        sys.exit(2)
+    server = SidecarServer(config, ssl_context=build_ssl_context(config))
+    scheme = "https" if config.secure else "http"
+    print(f"PVE Sensors API v3 started on {scheme}://{config.bind}:{config.port}")
+    print(f"Allowed client IPs: {', '.join(sorted(config.allowed_ips))}")
+    if not config.secure:
+        print("WARNING: compatibility mode - plain HTTP, no token. Re-run the "
+              "installer without --legacy-http to enable HTTPS and a token.")
     print("Endpoints:")
     print("  GET /sensors         - lm-sensors data")
     print("  GET /smart           - Basic SMART data (fast)")

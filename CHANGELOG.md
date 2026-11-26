@@ -18,6 +18,15 @@ Releases before the fork are listed in the
   require a Home Assistant administrator and validate their input.
 - Node reboot and shutdown services now honour the node-controls setting, and
   node control buttons are no longer created for entries that never opted in.
+- The hardware sidecar now serves HTTPS with a self-signed certificate that
+  Home Assistant pins, and requires a random bearer token on every request.
+  Clients outside its allow-list are dropped before the TLS handshake and
+  blocked by systemd as well. It serves at most 8 requests at once, gives a
+  client 15 seconds to send its request, and runs in a tighter systemd
+  sandbox.
+- The sidecar installer downloads from this fork's releases and installs the
+  sidecar only if it matches the release's `SHA256SUMS`. It no longer
+  downloads from upstream's `main` branch.
 
 ### Added
 - Reauthentication flow: a rotated password or token, or a changed server
@@ -32,6 +41,12 @@ Releases before the fork are listed in the
   groups on or off.
 - PVE options: switches for memory-module, backup-progress, storage-list and
   nodes-list sensors, which existed but could not be changed.
+- Sidecar settings on the PVE Reconfigure page (token and certificate
+  fingerprint). They are checked against the sidecar before they are saved.
+- Repair issues for a sidecar that uses plain HTTP, presents a changed
+  certificate, or rejects the token.
+- Sidecar installer options: `--version`, `--local`, `--allowed-ips`
+  (non-interactive), `--rotate-token`, `--rotate-cert`, `--legacy-http`.
 
 ### Fixed
 - The VM/CT selection on the options page no longer disappears when another
@@ -52,6 +67,11 @@ Releases before the fork are listed in the
 - Security architecture section in the README.
 
 ### Changed
+- **Re-running the sidecar installer switches the sidecar to HTTPS with a
+  token.** Afterwards, enter the token and certificate fingerprint it prints
+  on the PVE entry's Reconfigure page. Until then that node's hardware sensors
+  are unavailable. `--legacy-http` keeps the old plain-HTTP mode; Home
+  Assistant shows a repair warning while a sidecar uses it.
 - `manifest.json`, the README and the issue template point at this fork
   instead of upstream; HACS installs it as a custom repository.
 

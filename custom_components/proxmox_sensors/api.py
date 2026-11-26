@@ -23,6 +23,21 @@ class CannotConnect(Exception):
     """Raised when the API cannot be reached."""
 
 
+SIDECAR_PORT = 9000
+
+
+class SidecarAuthError(Exception):
+    """The sidecar rejected the token (HTTP 401/403)."""
+
+
+class SidecarCertificateError(Exception):
+    """The sidecar no longer presents its pinned certificate.
+
+    Deliberately not an AuthenticationError: the Proxmox API itself is fine,
+    so this must not start the entry's reauth flow.
+    """
+
+
 class CertificateMismatchError(AuthenticationError):
     """The server no longer presents the pinned certificate.
 
@@ -112,6 +127,8 @@ class ProxmoxClient:
         port: Optional[int] = None,
         verify_ssl: bool = True,
         cert_fingerprint: Optional[str] = None,
+        sidecar_token: Optional[str] = None,
+        sidecar_fingerprint: Optional[str] = None,
     ):
         self._host = host
         self._user = user
@@ -122,6 +139,11 @@ class ProxmoxClient:
         self._port = port
         self._verify_ssl = verify_ssl
         self._cert_fingerprint = cert_fingerprint
+        self._sidecar_token = sidecar_token
+        self._sidecar_fingerprint = sidecar_fingerprint
+        # Result of the latest sidecar response: None (secure), "insecure"
+        # (legacy plain HTTP), "certificate_changed" or "auth_failed".
+        self.sidecar_problem: str | None = None
         self._proxmox: Optional[ProxmoxAPI] = None
         self._build_error: Exception | None = None
         # Set once a pinned certificate mismatch is seen; the coordinators turn
@@ -567,108 +589,97 @@ class ProxmoxClient:
         data = {"command": "reboot"}
         return await self.post(hass, path, data)
 
-    async def get_lm_sensors_http(
-        self, hass, node: str, raise_errors: bool = False
-    ):
-        url = f"http://{self._host}:9000/sensors"
+    # ----- hardware sidecar (pve-sensors-api.py on the node, port 9000) -----
 
+    def _sidecar_fetch(self, endpoint: str, timeout: float):
+        """GET one sidecar endpoint and return the decoded JSON (raises on failure).
+
+        With a sidecar token configured the request goes over HTTPS to the
+        pinned sidecar certificate and carries the token; nothing is sent if
+        the certificate differs. Without a token the sidecar is in its legacy
+        plain-HTTP mode, which ``sidecar_problem`` reports as "insecure".
+        """
+        if not self._sidecar_token:
+            response = requests.get(
+                f"http://{self._host}:{SIDECAR_PORT}{endpoint}", timeout=timeout
+            )
+            response.raise_for_status()
+            payload = response.json()
+            self.sidecar_problem = "insecure"
+            return payload
+        if not self._sidecar_fingerprint:
+            raise CertificateNotPinned("The sidecar token is set but no certificate is pinned")
+        with pin_session(requests.Session(), self._sidecar_fingerprint) as session:
+            try:
+                response = session.get(
+                    f"https://{self._host}:{SIDECAR_PORT}{endpoint}",
+                    timeout=timeout,
+                    headers={"Authorization": f"Bearer {self._sidecar_token}"},
+                )
+            except requests.exceptions.SSLError as err:
+                if is_fingerprint_mismatch(err):
+                    self.sidecar_problem = "certificate_changed"
+                    raise SidecarCertificateError(
+                        f"The sidecar on {self._host} presented a different certificate"
+                    ) from err
+                raise
+        if response.status_code in (401, 403):
+            self.sidecar_problem = "auth_failed"
+            raise SidecarAuthError(f"The sidecar on {self._host} rejected the request")
+        response.raise_for_status()
+        payload = response.json()
+        self.sidecar_problem = None
+        return payload
+
+    async def _sidecar_get(self, hass, endpoint, timeout, raise_errors, fallback,
+                           validate=None):
         def _fetch():
             try:
-                r = requests.get(url, timeout=5)
-                r.raise_for_status()
-                return r.json()
+                payload = self._sidecar_fetch(endpoint, timeout)
+                if validate is not None and not validate(payload):
+                    raise ValueError(f"Invalid sidecar response from {endpoint}")
+                return payload
             except Exception:
                 if raise_errors:
                     raise
-                return {}
+                return fallback() if callable(fallback) else fallback
 
         return await hass.async_add_executor_job(_fetch)
+
+    async def check_sidecar(self, hass):
+        """Validate the sidecar settings against /health; raises on any failure."""
+        return await hass.async_add_executor_job(self._sidecar_fetch, "/health", 10)
+
+    async def get_lm_sensors_http(
+        self, hass, node: str, raise_errors: bool = False
+    ):
+        return await self._sidecar_get(hass, "/sensors", 5, raise_errors, dict)
 
     async def get_smart_data_http(
         self, hass, node: str, raise_errors: bool = False
     ):
-        url = f"http://{self._host}:9000/smart"
-
-        def _fetch():
-            try:
-                r = requests.get(url, timeout=15)
-                r.raise_for_status()
-                return r.json()
-            except Exception:
-                if raise_errors:
-                    raise
-                return {}
-
-        return await hass.async_add_executor_job(_fetch)
+        return await self._sidecar_get(hass, "/smart", 15, raise_errors, dict)
 
     async def get_smart_disk_http(
         self, hass, node: str, path: str, protect: bool, raise_errors: bool = False
     ):
         query = urlencode({"path": path, "protect": int(protect)})
-        url = f"http://{self._host}:9000/smart-disk?{query}"
-
-        def _fetch():
-            try:
-                response = requests.get(url, timeout=9)
-                response.raise_for_status()
-                payload = response.json()
-                if not isinstance(payload, dict) or payload.get("status") not in (
-                    "ok", "standby", "unsupported", "error"
-                ):
-                    raise ValueError("Invalid per-disk SMART response")
-                return payload
-            except Exception:
-                if raise_errors:
-                    raise
-                return {"status": "error"}
-
-        return await hass.async_add_executor_job(_fetch)
+        return await self._sidecar_get(
+            hass, f"/smart-disk?{query}", 9, raise_errors, lambda: {"status": "error"},
+            validate=lambda payload: isinstance(payload, dict) and payload.get("status") in (
+                "ok", "standby", "unsupported", "error"
+            ),
+        )
 
     async def get_memory_http(self, hass, node: str, raise_errors: bool = False):
-        url = f"http://{self._host}:9000/memory"
-
-        def _fetch():
-            try:
-                r = requests.get(url, timeout=15)
-                r.raise_for_status()
-                return r.json()
-            except Exception:
-                if raise_errors:
-                    raise
-                return {}
-
-        return await hass.async_add_executor_job(_fetch)
+        return await self._sidecar_get(hass, "/memory", 15, raise_errors, dict)
 
     async def get_ksm_http(self, hass, node: str, raise_errors: bool = False):
         """Get the sidecar's fixed KSM snapshot."""
-        url = f"http://{self._host}:9000/ksm"
-        def _fetch():
-            try:
-                response = requests.get(url, timeout=5)
-                response.raise_for_status()
-                return response.json()
-            except Exception:
-                if raise_errors:
-                    raise
-                return {}
-        return await hass.async_add_executor_job(_fetch)
+        return await self._sidecar_get(hass, "/ksm", 5, raise_errors, dict)
 
     async def get_mounts(self, hass, node, raise_errors: bool = False):
-        return await hass.async_add_executor_job(
-            self._get_mounts_sync, raise_errors
-        )
-
-    def _get_mounts_sync(self, raise_errors: bool = False):
-        url = f"http://{self._host}:9000/mounts"
-
-        try:
-            r = requests.get(url, timeout=15)
-            r.raise_for_status()
-            return r.json()
-        except Exception:
-            if raise_errors:
-                raise
-            return {}
+        return await self._sidecar_get(hass, "/mounts", 15, raise_errors, dict)
 
     async def get_zfs_pools(self, hass, node, raise_errors: bool = False):
         return (

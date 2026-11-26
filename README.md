@@ -40,6 +40,7 @@
 - [Proxmox Backup Server (PBS)](#%EF%B8%8F-proxmox-backup-server-pbs)
 - [Remote / Hosted PBS](#%EF%B8%8F-remote--hosted-pbs)
 - [Multi-PBS Support](#-multi-pbs-support)
+- [Hardware Sidecar](#-hardware-sidecar)
 - [Sidecar Status](#%EF%B8%8F-sidecar-status)
 - [Cluster Monitoring](#-cluster-monitoring)
 - [Mounted Disks & Network Storage](#-mounted-disks--network-storage)
@@ -77,19 +78,29 @@ The integration is designed for both standalone Proxmox nodes and multi-node env
 - 🎨 **Dynamic Proxmox Dashboard** — PVE, PBS, CLUSTER and PDM dashboards generated from the resources available in Home Assistant.
 
 > [!CAUTION]
-> **Upgrading from an older installation?**  
-> Keep the sidecar script updated on every PVE node so its endpoints remain aligned with the integration.
+> **Upgrading from an older installation?**
+> Re-run the sidecar installer on every PVE node (see [Hardware Sidecar](#-hardware-sidecar)) so its endpoints stay aligned with the integration and it switches to HTTPS with a token.
 
-<details>
-<summary>Update <code>pve-sensors-api.py</code></summary>
+---
+
+## 🔌 Hardware Sidecar
+
+Temperatures, fans, SMART, memory modules, mounts and KSM come from a small optional service on each PVE node, `pve-sensors-api.py`, listening on port 9000. Install or update it as root on the node:
 
 ```bash
-wget https://raw.githubusercontent.com/Javisen/proxmox_sensors/main/scripts/pve-sensors-api.py -O /usr/local/bin/pve-sensors-api.py
-chmod +x /usr/local/bin/pve-sensors-api.py
-systemctl restart pve-sensors.service
+bash <(curl -fsSL https://github.com/darthrater78/proxmox_sensors/releases/latest/download/install-sidecar.sh)
 ```
 
-</details>
+The installer:
+
+- asks which Home Assistant IP addresses may connect (or pass `--allowed-ips 192.0.2.50`);
+- downloads `pve-sensors-api.py` from this fork's latest release and refuses to install it unless it matches the release's `SHA256SUMS` (`--version TAG` installs a specific release, `--local DIR` a copy you downloaded and checked yourself);
+- generates a self-signed certificate and a random token (both kept on re-runs; `--rotate-cert` / `--rotate-token` replace them);
+- installs a sandboxed systemd service that only the allowed addresses can reach, and prints the **token** and the **certificate SHA-256 fingerprint**.
+
+Then, in Home Assistant, open the node's Proxmox entry → **⋮ → Reconfigure** and enter the **Sidecar token** and **Sidecar certificate SHA-256**. Home Assistant checks them against the sidecar before saving, and from then on sends requests only to that exact certificate.
+
+`--legacy-http` keeps the old plain-HTTP, IP-only behaviour for integration versions without token support. While a sidecar answers over plain HTTP, Home Assistant shows a **repair warning** for that entry; a changed sidecar certificate or a rejected token shows a repair error instead.
 
 ---
 
@@ -454,7 +465,17 @@ How this fork is built, and later changed, with regard to security. Every securi
 **Components and trust boundaries**
 
 - **Integration (Home Assistant).** Talks to the Proxmox VE / PBS / PDM HTTPS APIs with the credentials you enter. Home Assistant stores config-entry credentials in its own `.storage` directory; protect that directory and your Home Assistant backups like any other secret store.
-- **Sidecar (`pve-sensors-api.py`, optional).** A small HTTP service on each PVE node, port 9000, that exposes read-only hardware data (lm-sensors, SMART, memory modules, mounts, KSM). It runs as root because SMART and DMI reads need raw device access. It accepts requests only from the IP addresses listed in `/etc/proxmox-sensors/sidecar.conf`. Every endpoint is a fixed command with no client-controlled arguments, except `/smart-disk`, which accepts only an existing block device under `/dev`.
+- **Sidecar (`pve-sensors-api.py`, optional).** A small service on each PVE node, port 9000, that exposes read-only hardware data (lm-sensors, SMART, memory modules, mounts, KSM). It runs as root because SMART and DMI reads need raw device access. Every endpoint is a fixed command with no client-controlled arguments, except `/smart-disk`, which accepts only an existing block device under `/dev`.
+
+**Sidecar security**
+
+- **HTTPS with a pinned certificate.** The installer generates a self-signed ECDSA P-256 certificate; Home Assistant pins its SHA-256 fingerprint (entered from the installer's output, not fetched over the network) and refuses to send anything to a different certificate. TLS 1.2 is the minimum.
+- **Token.** Every request carries a 256-bit random bearer token, compared in constant time. The sidecar refuses to start with a token but no TLS, or with a token in a config file readable by anyone but root.
+- **Allow-list, enforced twice.** Connections from addresses outside `ALLOWED_IPS` are dropped before the TLS handshake, and systemd's `IPAddressDeny=any` / `IPAddressAllow=` block them at the kernel too.
+- **Resource limits.** At most 8 requests are served at once (extra connections are refused, not queued), and a client has 15 seconds to complete the handshake and send its request.
+- **Sandbox.** The systemd unit sets `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `NoNewPrivileges`, kernel-module/log/cgroup protection, namespace and address-family restrictions; it keeps raw device access, which SMART needs.
+- **Verified installs.** The installer installs only a sidecar matching the release's `SHA256SUMS`.
+- **Legacy mode.** `--legacy-http` (plain HTTP, allow-list only) stays available for compatibility; Home Assistant flags such a sidecar with a repair warning.
 
 **Transport security (Proxmox APIs)**
 
@@ -474,7 +495,10 @@ How this fork is built, and later changed, with regard to security. Every securi
 - Each release attaches the sidecar and its installer with a `SHA256SUMS` file and a signed build-provenance attestation. Check a download with `gh attestation verify pve-sensors-api.py --repo darthrater78/proxmox_sensors`.
 - Releases are published only from tags on `main` whose commit passed CI and whose `manifest.json` version matches the tag.
 
-**Known gaps being worked on** (from the 2026-11-25 audit): the sidecar has no authentication beyond its IP allowlist and no request timeouts, runs with a broad systemd sandbox, and its installer downloads from `main` without a checksum. See [CHANGELOG.md](CHANGELOG.md) as each is closed.
+**Known limits**
+
+- The sidecar runs as root with raw device access; the sandbox narrows what it can touch, not the devices SMART needs.
+- `SHA256SUMS` comes from the same release as the files it covers, so it catches corrupted or swapped downloads but not a compromised release; `gh attestation verify` checks that the files were built by this repository's release workflow.
 
 ---
 

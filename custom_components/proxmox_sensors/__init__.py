@@ -5,7 +5,7 @@ import logging
 import asyncio
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.components import persistent_notification
 from homeassistant.exceptions import (
     ConfigEntryAuthFailed,
@@ -15,6 +15,7 @@ from homeassistant.exceptions import (
 from homeassistant.const import Platform
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import issue_registry as ir
 import homeassistant.helpers.config_validation as cv
 
 from .services import register_services
@@ -32,6 +33,8 @@ from .const import (
     CONF_PLATFORM_TYPE,
     CONF_VERIFY_SSL,
     CONF_CERT_FINGERPRINT,
+    CONF_SIDECAR_FINGERPRINT,
+    CONF_SIDECAR_TOKEN,
 )
 
 from .api import AuthenticationError, ProxmoxClient
@@ -314,6 +317,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             monitored_pbs_datastores(entry, coordinator.data.get("pbs_datastores", {})),
         )
 
+    if data.get(CONF_PLATFORM_TYPE) == "PVE":
+        _track_sidecar_issues(hass, entry, client, coordinator)
+
     register_services(hass, entry)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -371,7 +377,58 @@ async def _async_build_client(hass: HomeAssistant, entry: ConfigEntry, server_ty
         server_type=server_type,
         verify_ssl=verify_ssl,
         cert_fingerprint=fingerprint,
+        sidecar_token=data.get(CONF_SIDECAR_TOKEN),
+        sidecar_fingerprint=normalize_fingerprint(data.get(CONF_SIDECAR_FINGERPRINT)),
     )
+
+
+# client.sidecar_problem -> repair issue shown for it
+_SIDECAR_ISSUES = {
+    "insecure": ("sidecar_insecure", ir.IssueSeverity.WARNING),
+    "certificate_changed": ("sidecar_certificate_changed", ir.IssueSeverity.ERROR),
+    "auth_failed": ("sidecar_auth_failed", ir.IssueSeverity.ERROR),
+}
+SIDECAR_SECURITY_URL = "https://github.com/darthrater78/proxmox_sensors#-hardware-sidecar"
+
+
+def _track_sidecar_issues(hass: HomeAssistant, entry: ConfigEntry, client, coordinator) -> None:
+    """Keep a repair issue in step with the sidecar's last observed state.
+
+    A legacy plain-HTTP sidecar gets a warning; a changed sidecar certificate
+    or a rejected token gets an error. Each clears once the sidecar answers
+    over HTTPS with the configured token again.
+    """
+    shown = {"problem": object()}
+
+    @callback
+    def _update() -> None:
+        problem = client.sidecar_problem
+        if problem == shown["problem"]:
+            return
+        shown["problem"] = problem
+        active = _SIDECAR_ISSUES.get(problem)
+        for key, severity in _SIDECAR_ISSUES.values():
+            issue_id = f"{key}_{entry.entry_id}"
+            if active and key == active[0]:
+                ir.async_create_issue(
+                    hass, DOMAIN, issue_id,
+                    is_fixable=False,
+                    severity=severity,
+                    translation_key=key,
+                    translation_placeholders={"title": entry.title, "host": entry.data[CONF_HOST]},
+                    learn_more_url=SIDECAR_SECURITY_URL,
+                )
+            else:
+                ir.async_delete_issue(hass, DOMAIN, issue_id)
+
+    _update()
+    entry.async_on_unload(coordinator.async_add_listener(_update))
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Drop this entry's repair issues with it."""
+    for key, _severity in _SIDECAR_ISSUES.values():
+        ir.async_delete_issue(hass, DOMAIN, f"{key}_{entry.entry_id}")
 
 
 def _raise_if_auth_failed(err: BaseException, host: str) -> None:

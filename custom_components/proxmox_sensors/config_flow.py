@@ -30,6 +30,8 @@ from .api import (
     CertificateMismatchError,
     PermissionError as ProxmoxPermissionError,
     ProxmoxClient,
+    SidecarAuthError,
+    SidecarCertificateError,
 )
 from .const import (
     DOMAIN,
@@ -42,6 +44,8 @@ from .const import (
     CONF_PLATFORM_TYPE,
     CONF_VERIFY_SSL,
     CONF_CERT_FINGERPRINT,
+    CONF_SIDECAR_FINGERPRINT,
+    CONF_SIDECAR_TOKEN,
     PDM_IDENTITY_ID,
 )
 from .tls import (
@@ -585,6 +589,8 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             server_type=server_type,
             verify_ssl=self._config.get(CONF_VERIFY_SSL, False),
             cert_fingerprint=self._config.get(CONF_CERT_FINGERPRINT),
+            sidecar_token=self._config.get(CONF_SIDECAR_TOKEN),
+            sidecar_fingerprint=self._config.get(CONF_SIDECAR_FINGERPRINT),
         )
 
     # ===== CERTIFICATE PINNING ================================
@@ -731,6 +737,8 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 candidate, secret_error = self._reconfigure_candidate(
                     data, user_input, host, token_only
                 )
+                if not secret_error and platform == "PVE":
+                    secret_error = self._sidecar_candidate(candidate, data, user_input)
                 if secret_error:
                     errors["base"] = secret_error
                 else:
@@ -753,6 +761,13 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         schema[vol.Optional(CONF_TOKEN_ID, default=data.get(CONF_TOKEN_ID) or "")] = str
         schema[vol.Optional(CONF_TOKEN_SECRET)] = _SECRET
         schema[vol.Optional(CONF_VERIFY_SSL, default=data.get(CONF_VERIFY_SSL, False))] = bool
+        if platform == "PVE":
+            stored = normalize_fingerprint(data.get(CONF_SIDECAR_FINGERPRINT))
+            schema[vol.Optional(CONF_SIDECAR_TOKEN)] = _SECRET
+            schema[vol.Optional(
+                CONF_SIDECAR_FINGERPRINT,
+                default=display_fingerprint(stored) if stored else "",
+            )] = str
         return self.async_show_form(
             step_id="reconfigure",
             data_schema=vol.Schema(schema),
@@ -794,6 +809,49 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 candidate.pop(CONF_CERT_FINGERPRINT, None)
         return candidate, None
 
+    def _sidecar_candidate(self, candidate, data, user_input):
+        """Apply the sidecar fields; returns an error key or None.
+
+        An empty fingerprint field means the sidecar runs in legacy plain-HTTP
+        mode (or not at all), so the stored token is dropped with it. A blank
+        token field keeps the stored token.
+        """
+        raw_fp = str(user_input.get(CONF_SIDECAR_FINGERPRINT) or "").strip()
+        typed_token = str(user_input.get(CONF_SIDECAR_TOKEN) or "").strip()
+        if not raw_fp:
+            if typed_token:
+                return "sidecar_fingerprint_required"
+            candidate.pop(CONF_SIDECAR_TOKEN, None)
+            candidate.pop(CONF_SIDECAR_FINGERPRINT, None)
+            return None
+        fingerprint = normalize_fingerprint(raw_fp.rsplit("=", 1)[-1])
+        if fingerprint is None:
+            return "invalid_sidecar_fingerprint"
+        token = typed_token or data.get(CONF_SIDECAR_TOKEN)
+        if not token:
+            return "sidecar_token_required"
+        candidate[CONF_SIDECAR_TOKEN] = token
+        candidate[CONF_SIDECAR_FINGERPRINT] = fingerprint
+        return None
+
+    async def _check_sidecar(self, client, entry):
+        """Test changed sidecar settings against the sidecar; returns an error key or None."""
+        keys = (CONF_HOST, CONF_SIDECAR_TOKEN, CONF_SIDECAR_FINGERPRINT)
+        if not self._config.get(CONF_SIDECAR_TOKEN) or all(
+            self._config.get(key) == entry.data.get(key) for key in keys
+        ):
+            return None
+        try:
+            await client.check_sidecar(self.hass)
+        except SidecarCertificateError:
+            return "sidecar_certificate_changed"
+        except SidecarAuthError:
+            return "sidecar_auth_failed"
+        except Exception as err:  # connection refused, TLS error, bad JSON...
+            _LOGGER.debug("Sidecar check on %s failed: %s", self._config[CONF_HOST], err)
+            return "sidecar_cannot_connect"
+        return None
+
     async def _finish_reconfigure(self, entry, platform):
         """Validate the candidate against the same server; abort/save, or an error key."""
         client = self._build_client("PVE" if platform in ("PVE", "CLUSTER") else platform)
@@ -820,6 +878,8 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return "insufficient_permissions"
         if identity_error:
             return identity_error
+        if platform == "PVE" and (sidecar_error := await self._check_sidecar(client, entry)):
+            return sidecar_error
 
         unique_id = _config_entry_unique_id(self._config) or entry.unique_id
         if unique_id != entry.unique_id and any(

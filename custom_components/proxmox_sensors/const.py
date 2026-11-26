@@ -25,4 +25,7 @@ SERVER_PBS = "PBS"
 CONF_VERIFY_SSL = "verify_ssl"
 # SHA-256 of the server certificate, pinned when verify_ssl is off.
 CONF_CERT_FINGERPRINT = "cert_fingerprint"
+# Hardware sidecar (pve-sensors-api.py): bearer token and pinned certificate.
+CONF_SIDECAR_TOKEN = "sidecar_token"
+CONF_SIDECAR_FINGERPRINT = "sidecar_fingerprint"
 CONF_PORT = "port"
