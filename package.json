@@ -18,7 +18,7 @@
     "preview": "astro preview"
   },
   "devDependencies": {
-    "astro": "^7.3.5",
+    "astro": "^7.4.7",
     "typescript": "^7.0.2"
   }
 }
