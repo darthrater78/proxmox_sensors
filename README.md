@@ -6,7 +6,7 @@
 
 > [!NOTE]
 > This is **[darthrater78/proxmox_sensors](https://github.com/darthrater78/proxmox_sensors)**, a security-hardened fork of [Javisen/proxmox_sensors](https://github.com/Javisen/proxmox_sensors). It uses date versions (`YYYY.M.D`) and its own release pipeline.
-> **[Latest release notes](https://github.com/darthrater78/proxmox_sensors/releases/latest)** · [Changelog](CHANGELOG.md) · [Security architecture](#-security-architecture)
+> **[Release notes for v2026.11.26](https://github.com/darthrater78/proxmox_sensors/releases/tag/v2026.11.26)** · [All releases](https://github.com/darthrater78/proxmox_sensors/releases) · [Changelog](CHANGELOG.md) · [Security architecture](#-security-architecture)
 
 # 🚀 Proxmox Extended Sensors
 

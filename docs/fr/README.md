@@ -68,11 +68,11 @@ Les services `create_vzdump_backup` et `backup_all` utilisent l'exécution nativ
 
 ## 🧩 Installation
 ### Via HACS — recommandé
-[![Ouvrir Proxmox Extended Sensors dans HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=Javisen&repository=proxmox_sensors&category=integration)
+[![Ouvrir Proxmox Extended Sensors dans HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=darthrater78&repository=proxmox_sensors&category=integration)
 
-**Proxmox Extended Sensors est inclus dans le dépôt HACS par défaut. Aucun dépôt personnalisé n'est nécessaire.**
+**Ce fork s'installe comme dépôt personnalisé HACS.** Il utilise le même domaine d'intégration que le projet d'origine : supprimez d'abord le téléchargement d'origine, les deux ne peuvent pas être installés côte à côte.
 
-1. Ouvrir **HACS → Intégrations**.
+1. Ouvrir **HACS → ⋮ → Dépôts personnalisés** et ajouter `https://github.com/darthrater78/proxmox_sensors` avec le type **Intégration**.
 2. Rechercher **Proxmox Extended Sensors** et le télécharger.
 3. Redémarrer Home Assistant.
 4. Aller dans **Paramètres → Appareils et services → Ajouter une intégration** et rechercher l'intégration.
@@ -85,4 +85,4 @@ Installation manuelle : copier dans `/config/custom_components/proxmox_sensors`,
 Le projet prend en charge les installations modernes de Proxmox VE, Proxmox Backup Server et Home Assistant. Les versions minimales exactes devront être vérifiées dans les notes de version avant publication.
 
 ---
-<p align="center"><i>Maintained by Javisen — MIT License</i></p>
+<p align="center"><i>Fork of <a href="https://github.com/Javisen/proxmox_sensors">Javisen/proxmox_sensors</a>, maintained by darthrater78 — MIT License</i></p>

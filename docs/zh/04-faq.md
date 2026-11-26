@@ -4,7 +4,7 @@
 检查可访问性、user/realm、token、secret、API 权限和 SSL。`Permission denied` 通常表示权限不足。
 
 ## 🌡️ 硬件与 Sidecar
-缺少温度时：运行 `sensors`、`systemctl status pve-sensors.service`，然后访问 `http://PROXMOX_IP:9000/sensors`。
+缺少温度时：先运行 `sensors`，再运行 `systemctl status pve-sensors.service`。然后查看 Home Assistant 的 **Settings → Repairs**：如果 Sidecar 拒绝令牌、出示了不同的证书或仍在使用未加密的 HTTP，会在那里提示。Sidecar 会把错误记录到节点日志：`journalctl -u pve-sensors.service -n 50`。
 
 **Sidecar Status** 汇总 Memory、Mounts、Sensors 和 SMART（`ok`、`degraded`、`error`、`unknown`）。V5 尽可能保留最后有效值。
 

@@ -787,8 +787,8 @@ class ProxmoxFailedTasksSensor(ProxmoxClusterBaseSensor):
 
             try:
                 task_time = datetime.fromtimestamp(endtime, tz=timezone.utc)
-            except Exception:
-                continue
+            except (TypeError, ValueError, OverflowError, OSError):
+                continue  # malformed task timestamp: skip this task
 
             if task_time < cutoff:
                 continue

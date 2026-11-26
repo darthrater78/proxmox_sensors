@@ -57,17 +57,22 @@ No fuerces `coretemp` en sistemas que utilicen otro controlador de sensores de h
 
 ## 4. Instalar el Sidecar
 
-Ejecuta el siguiente comando en cada host PVE/PBS donde quieras instalar el Hardware Sidecar:
+Ejecuta el siguiente comando como root en cada nodo PVE donde quieras instalar el Hardware Sidecar:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Javisen/proxmox_sensors/main/scripts/install-sidecar.sh)
+bash <(curl -fsSL https://github.com/darthrater78/proxmox_sensors/releases/latest/download/install-sidecar.sh)
 ```
 
-Durante la instalación, se te pedirá que introduzcas la dirección o direcciones IP de tus instancias de Home Assistant. Puedes introducir varias direcciones IP separadas por comas.
+Durante la instalación, se te pedirá que introduzcas la dirección o direcciones IP de tus instancias de Home Assistant. Puedes introducir varias direcciones IP separadas por comas. Solo esas direcciones podrán acceder al Sidecar.
 
-Solo las direcciones IP especificadas podrán acceder al Hardware Sidecar.
+El instalador descarga el Sidecar de la última versión publicada de este fork y solo lo instala si coincide con el archivo `SHA256SUMS` de esa versión. Después genera un certificado autofirmado y un token aleatorio, y muestra ambos:
 
-> **Nota:** Si el Sidecar ya está instalado, ejecuta de nuevo el mismo comando para actualizar la instalación existente y configurar las direcciones IP autorizadas de Home Assistant.
+- el **Sidecar token**
+- la huella SHA-256 del certificado (**Sidecar certificate SHA-256**)
+
+Guárdalos para el paso 6.
+
+> **Nota:** Ejecuta de nuevo el mismo comando para actualizar una instalación existente. El token y el certificado se conservan, así que Home Assistant sigue funcionando; `--rotate-token` o `--rotate-cert` los sustituyen.
 
 ## 5. Comprobar el Sidecar
 
@@ -77,10 +82,20 @@ Comprueba el estado del servicio Sidecar:
 systemctl status pve-sensors.service
 ```
 
-El servicio debería aparecer como `active (running)`.
+El servicio debería aparecer como `active (running)`. Si no es así, su registro explica el motivo:
+
+```bash
+journalctl -u pve-sensors.service -n 50
+```
+
+## 6. Conectar Home Assistant con el Sidecar
+
+Cuando la entrada PVE del nodo ya exista en Home Assistant (consulta [03. Configuración de Home Assistant](03-login-pve-pbs.md)), abre **Ajustes → Dispositivos y servicios → Proxmox Extended Sensors**, elige la entrada del nodo y después **⋮ → Reconfigurar**. Introduce el **Sidecar token** y el **Sidecar certificate SHA-256** del paso 4.
+
+Home Assistant los comprueba contra el Sidecar antes de guardarlos. A partir de entonces solo envía peticiones a ese certificado exacto, junto con el token. Hasta que los introduzcas, los sensores de hardware del nodo no estarán disponibles.
 ---
 
-## 6. Qué hace V5 si falla el sidecar
+## 7. Qué hace V5 si falla el sidecar
 
 Un fallo temporal del sidecar no provoca que desaparezcan inmediatamente todas las entidades de hardware que anteriormente tenían datos válidos.
 

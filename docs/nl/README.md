@@ -68,11 +68,11 @@ Afhankelijk van beschikbare data kan V5 nodes, quorum, CPU/RAM/load/I/O wait, RX
 
 ## 🧩 Installatie
 ### Via HACS — aanbevolen
-[![Open Proxmox Extended Sensors in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=Javisen&repository=proxmox_sensors&category=integration)
+[![Open Proxmox Extended Sensors in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=darthrater78&repository=proxmox_sensors&category=integration)
 
-**Proxmox Extended Sensors staat in de standaard HACS-repository. Een custom repository is niet nodig.**
+**Deze fork wordt geïnstalleerd als aangepaste HACS-repository.** Hij gebruikt hetzelfde integratiedomein als het oorspronkelijke project; verwijder dus eerst de oorspronkelijke download, want beide kunnen niet naast elkaar geïnstalleerd zijn.
 
-1. Open **HACS → Integraties**.
+1. Open **HACS → ⋮ → Aangepaste repositories** en voeg `https://github.com/darthrater78/proxmox_sensors` toe met type **Integratie**.
 2. Zoek **Proxmox Extended Sensors** en download.
 3. Herstart Home Assistant.
 4. Ga naar **Instellingen → Apparaten & diensten → Integratie toevoegen** en zoek de integratie.
@@ -85,4 +85,4 @@ Handmatig: kopieer naar `/config/custom_components/proxmox_sensors` en herstart 
 Het project ondersteunt moderne installaties van Proxmox VE, Proxmox Backup Server en Home Assistant. Exacte minimumversies moeten vóór publicatie met de actuele release notes worden gecontroleerd.
 
 ---
-<p align="center"><i>Maintained by Javisen — MIT License</i></p>
+<p align="center"><i>Fork of <a href="https://github.com/Javisen/proxmox_sensors">Javisen/proxmox_sensors</a>, maintained by darthrater78 — MIT License</i></p>

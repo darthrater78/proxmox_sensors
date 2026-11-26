@@ -68,11 +68,11 @@ V5 включает необязательный Lovelace dashboard для **PVE
 
 ## 🧩 Установка
 ### Через HACS — рекомендуется
-[![Открыть Proxmox Extended Sensors в HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=Javisen&repository=proxmox_sensors&category=integration)
+[![Открыть Proxmox Extended Sensors в HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=darthrater78&repository=proxmox_sensors&category=integration)
 
-**Proxmox Extended Sensors включён в стандартный репозиторий HACS. Пользовательский репозиторий не требуется.**
+**Этот форк устанавливается как пользовательский репозиторий HACS.** Он использует тот же домен интеграции, что и исходный проект, поэтому сначала удалите исходную загрузку: установить их одновременно нельзя.
 
-1. Открыть **HACS → Интеграции**.
+1. Открыть **HACS → ⋮ → Пользовательские репозитории** и добавить `https://github.com/darthrater78/proxmox_sensors` с типом **Интеграция**.
 2. Найти **Proxmox Extended Sensors** и скачать.
 3. Перезапустить Home Assistant.
 4. Открыть **Настройки → Устройства и службы → Добавить интеграцию** и найти интеграцию.
@@ -85,4 +85,4 @@ V5 включает необязательный Lovelace dashboard для **PVE
 Проект поддерживает современные установки Proxmox VE, Proxmox Backup Server и Home Assistant. Точные минимальные версии следует сверить с актуальными release notes перед публикацией.
 
 ---
-<p align="center"><i>Maintained by Javisen — MIT License</i></p>
+<p align="center"><i>Fork of <a href="https://github.com/Javisen/proxmox_sensors">Javisen/proxmox_sensors</a>, maintained by darthrater78 — MIT License</i></p>

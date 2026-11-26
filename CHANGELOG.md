@@ -6,7 +6,22 @@ versions (`YYYY.M.D`, or `YYYY.M.D.N` for a later release on the same day).
 Releases before the fork are listed in the
 [upstream project](https://github.com/Javisen/proxmox_sensors/releases).
 
-## [Unreleased]
+## [2026.11.26] - 2026-11-26
+
+First release of this fork, based on upstream 5.2.3.
+
+**Breaking:**
+- The hardware sidecar switches to HTTPS with a token when its installer is
+  re-run. Enter the token and certificate fingerprint the installer prints on
+  the PVE entry's Reconfigure page; until then that node's hardware sensors
+  are unavailable. Install with `--legacy-http` to keep plain HTTP (Home
+  Assistant then shows a repair warning).
+- `confirm_shutdown_node` and `confirm_reboot_node` fail unless node controls
+  are enabled for the entry, and services that change something reject users
+  who are not Home Assistant administrators.
+- Entries with "Verify SSL Certificate" off pin the certificate they see on
+  their first start after upgrading, and show its fingerprint in a
+  notification for you to check.
 
 ### Security
 - Proxmox certificates are no longer accepted blindly when "Verify SSL
@@ -75,7 +90,8 @@ Releases before the fork are listed in the
   reauthentication prompt.
 - A rejected password now starts the reauthentication prompt instead of
   showing the server as unreachable.
-- Sidecar errors that were silently ignored are now logged to the journal.
+- Errors that were silently ignored are now logged: in the sidecar to the
+  node's journal, in the setup and options flows at debug level.
 
 ### Changed
 - **Re-running the sidecar installer switches the sidecar to HTTPS with a
@@ -86,6 +102,10 @@ Releases before the fork are listed in the
 - `manifest.json`, the README and the issue template point at this fork
   instead of upstream; HACS installs it as a custom repository.
 - `proxmoxer` is limited to the 2.x series it is tested with.
+- The installation guides in all ten languages describe this fork: HACS as
+  a custom repository, the sidecar installer from this fork's releases, and
+  entering the sidecar token and certificate fingerprint in Home Assistant.
+  They previously pointed at upstream's installer and plain-HTTP test URL.
 
 ### Removed
 - The upstream documentation website (Astro, GitHub Pages, `CNAME` for

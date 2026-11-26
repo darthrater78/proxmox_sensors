@@ -348,8 +348,8 @@ class ProxmoxHardwareSensor(ProxmoxBaseSensor):
                 if 1 < f < 145:
                     return round(f, 1)
 
-        except Exception:
-            pass
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            pass  # not a usable reading: the sensor reports no value
 
         return None
 

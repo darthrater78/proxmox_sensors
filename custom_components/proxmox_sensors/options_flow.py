@@ -405,8 +405,8 @@ class ProxmoxOptionsFlow(config_entries.OptionsFlow):
             if entry_data and entry_data.get("coordinator"):
                 coordinator_data = entry_data["coordinator"].data or {}
                 cluster_nodes = coordinator_data.get("cluster_nodes", cluster_nodes)
-        except Exception:
-            pass
+        except (AttributeError, TypeError) as err:
+            _LOGGER.debug("Cluster node list unavailable, using this node only: %s", err)
 
         self._cluster_nodes = cluster_nodes
 
@@ -530,7 +530,8 @@ class ProxmoxOptionsFlow(config_entries.OptionsFlow):
                         if iface.get("active") and iface.get("mac-address"):
                             detected_macs[node] = iface.get("mac-address")
                             break
-                except Exception:
+                except Exception as err:  # noqa: BLE001 - MAC detection is only a suggestion
+                    _LOGGER.debug("Could not detect the MAC address of node %s: %s", node, err)
                     continue
 
             vm_options = self._guest_visible["vms"]

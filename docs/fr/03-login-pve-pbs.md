@@ -1,9 +1,9 @@
 # 🔌 Étape 3 : Home Assistant — PVE, PBS et CLUSTER
 
 ## 1. HACS
-[![Ouvrir dans HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=Javisen&repository=proxmox_sensors&category=integration)
+[![Ouvrir dans HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=darthrater78&repository=proxmox_sensors&category=integration)
 
-L'intégration est dans le dépôt HACS par défaut : aucun dépôt personnalisé. Recherchez **Proxmox Extended Sensors** dans **HACS → Intégrations**, téléchargez-le puis redémarrez Home Assistant.
+Ce fork s'installe comme dépôt personnalisé HACS et utilise le même domaine d'intégration que le projet d'origine : supprimez d'abord le téléchargement d'origine. Dans **HACS → ⋮ → Dépôts personnalisés**, ajoutez `https://github.com/darthrater78/proxmox_sensors` avec le type **Intégration**, recherchez **Proxmox Extended Sensors**, téléchargez-le puis redémarrez Home Assistant.
 
 ## 2. Ajouter l'intégration
 **Paramètres → Appareils et services → Ajouter une intégration → Proxmox Extended Sensors**.

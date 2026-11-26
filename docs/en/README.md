@@ -172,12 +172,12 @@ V5 improves maintenance tracking by correlating actions with their actual PBS ta
 
 ### Via HACS — recommended
 
-[![Open your Home Assistant instance and open Proxmox Extended Sensors in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=Javisen&repository=proxmox_sensors&category=integration)
+[![Open your Home Assistant instance and open this fork in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=darthrater78&repository=proxmox_sensors&category=integration)
 
-**Proxmox Extended Sensors is included in the default HACS repository. No custom repository is required.**
+This fork is installed as a **HACS custom repository**. It uses the same integration domain as the upstream project, so remove the upstream download first; the two cannot be installed side by side.
 
-1. Open **HACS → Integrations**.
-2. Search for **Proxmox Extended Sensors**.
+1. Open **HACS → ⋮ → Custom repositories**, add `https://github.com/darthrater78/proxmox_sensors` with type **Integration**.
+2. Search for **Proxmox Extended Sensors** and open the entry from `darthrater78/proxmox_sensors`.
 3. Download the integration.
 4. Restart Home Assistant.
 5. Go to **Settings → Devices & Services → Add Integration**.
@@ -205,12 +205,12 @@ The project supports modern Proxmox VE, Proxmox Backup Server and Home Assistant
 
 ## 🤝 Contributions and Community
 
-Issues and pull requests are welcome in the official repository:
+Issues and pull requests for this fork are welcome at:
 
-https://github.com/Javisen/proxmox_sensors
+https://github.com/darthrater78/proxmox_sensors
 
 If the integration is useful to you, consider leaving a ⭐ on GitHub.
 
 ---
 
-<p align="center"><i>Maintained by Javisen — MIT License</i></p>
+<p align="center"><i>Fork of <a href="https://github.com/Javisen/proxmox_sensors">Javisen/proxmox_sensors</a>, maintained by darthrater78 — MIT License</i></p>

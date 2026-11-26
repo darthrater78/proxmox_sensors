@@ -26,17 +26,22 @@ sensors
 
 ## 4. 安装 Sidecar
 
-在每个需要安装 Hardware Sidecar 的 PVE/PBS 主机上运行以下命令：
+在每个需要安装 Hardware Sidecar 的 PVE 节点上，以 root 身份运行以下命令：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Javisen/proxmox_sensors/main/scripts/install-sidecar.sh)
+bash <(curl -fsSL https://github.com/darthrater78/proxmox_sensors/releases/latest/download/install-sidecar.sh)
 ```
 
-安装过程中，系统会提示你输入 Home Assistant 实例的 IP 地址。可以输入多个 IP 地址，并使用逗号分隔。
+安装过程中会提示输入 Home Assistant 实例的 IP 地址，多个地址用逗号分隔。只有这些地址可以访问 Sidecar。
 
-只有指定的 IP 地址才允许访问 Hardware Sidecar。
+安装程序会从本 fork 的最新 Release 下载 Sidecar，并且只有在其与该 Release 的 `SHA256SUMS` 一致时才会安装。随后它会生成自签名证书和随机令牌，并显示以下两项：
 
-> **注意：** 如果已经安装了 Sidecar，请再次运行相同的命令以更新现有安装，并配置允许访问的 Home Assistant IP 地址。
+- 令牌（**Sidecar token**）
+- 证书的 SHA-256 指纹（**Sidecar certificate SHA-256**）
+
+请保存好，第 6 步会用到。
+
+> **注意：** 再次运行同一命令即可更新现有安装。令牌和证书会保留，因此 Home Assistant 可继续工作；`--rotate-token` 或 `--rotate-cert` 会替换它们。
 
 ## 5. 检查 Sidecar
 
@@ -46,9 +51,19 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Javisen/proxmox_sensors/main
 systemctl status pve-sensors.service
 ```
 
-服务应显示为 `active (running)`。
+服务应显示为 `active (running)`。如果不是，可通过其日志查看原因：
 
-## 6. Sidecar 故障时
+```bash
+journalctl -u pve-sensors.service -n 50
+```
+
+## 6. 将 Home Assistant 连接到 Sidecar
+
+在 Home Assistant 中创建该节点的 PVE 条目后（参见 [03. Home Assistant 设置](03-login-pve-pbs.md)），打开 **Settings → Devices & Services → Proxmox Extended Sensors**，选择该节点的条目，然后点击 **⋮ → Reconfigure**。填入第 4 步中的 **Sidecar token** 和 **Sidecar certificate SHA-256**。
+
+Home Assistant 会在保存前向 Sidecar 验证这两项。此后它只会携带令牌向该证书发送请求。在填写之前，该节点的硬件传感器将不可用。
+
+## 7. Sidecar 故障时
 V5 会尽可能保留最后一次有效硬件值。**Sidecar Status** 将 Memory、Mounts、Sensors 和 SMART 显示为 `ok`、`degraded`、`error` 或 `unknown`。
 
 下一步：[02. Proxmox 用户与权限](02-proxmox-config.md)

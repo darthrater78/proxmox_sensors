@@ -229,6 +229,50 @@ def _equivalent_config_entry(data, entries) -> bool:
     return False
 
 
+def _connection_error_key(err: Exception, purpose: str) -> str:
+    """The form error for a failed connection check (unexpected errors are logged)."""
+    # CertificateMismatchError subclasses AuthenticationError, so it goes first.
+    if isinstance(err, CertificateMismatchError):
+        return "certificate_changed"
+    if isinstance(err, AuthenticationError):
+        return "invalid_auth"
+    if isinstance(err, ProxmoxPermissionError):
+        return "insufficient_permissions"
+    if isinstance(err, (CannotConnect, CertificateNotPinned)):
+        return "cannot_connect"
+    _LOGGER.error("Unexpected error during %s", purpose, exc_info=err)
+    return "unknown"
+
+
+def _reauth_secret_key(data, platform) -> str:
+    """Which secret the reauth form asks for: the token secret, or the password."""
+    if data.get(CONF_TOKEN_SECRET) or platform in ("PBS", "PDM"):
+        return CONF_TOKEN_SECRET
+    return CONF_PASSWORD
+
+
+def _reconfigure_schema(data, platform) -> vol.Schema:
+    """The reconfigure form, prefilled from the stored entry (secrets left blank)."""
+    schema = {
+        vol.Required(CONF_HOST, default=data.get(CONF_HOST, "")): str,
+        vol.Required(CONF_USER, default=data.get(CONF_USER, "")): str,
+    }
+    if platform not in ("PBS", "PDM"):
+        schema[vol.Required("use_token", default=bool(data.get(CONF_TOKEN_ID)))] = bool
+        schema[vol.Optional(CONF_PASSWORD)] = _SECRET
+    schema[vol.Optional(CONF_TOKEN_ID, default=data.get(CONF_TOKEN_ID) or "")] = str
+    schema[vol.Optional(CONF_TOKEN_SECRET)] = _SECRET
+    schema[vol.Optional(CONF_VERIFY_SSL, default=data.get(CONF_VERIFY_SSL, False))] = bool
+    if platform == "PVE":
+        stored = normalize_fingerprint(data.get(CONF_SIDECAR_FINGERPRINT))
+        schema[vol.Optional(CONF_SIDECAR_TOKEN)] = _SECRET
+        schema[vol.Optional(
+            CONF_SIDECAR_FINGERPRINT,
+            default=display_fingerprint(stored) if stored else "",
+        )] = str
+    return vol.Schema(schema)
+
+
 class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     VERSION = 3
@@ -648,56 +692,21 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         entry = self._get_reauth_entry()
         data = dict(entry.data)
         platform = _config_entry_platform(data)
-        secret_key = (
-            CONF_TOKEN_SECRET
-            if data.get(CONF_TOKEN_SECRET) or platform in ("PBS", "PDM")
-            else CONF_PASSWORD
-        )
-        errors = {}
+        secret_key = _reauth_secret_key(data, platform)
         stored = normalize_fingerprint(data.get(CONF_CERT_FINGERPRINT))
-        current = None
-        if not data.get(CONF_VERIFY_SSL, False):
-            try:
-                current = await self.hass.async_add_executor_job(
-                    fetch_certificate_fingerprint,
-                    data[CONF_HOST],
-                    DEFAULT_PORTS.get(platform, 8006),
-                )
-            except OSError:
-                errors["base"] = "cannot_connect"
+        current, error = await self._presented_fingerprint(data, platform)
         changed = current is not None and current != stored
 
-        if user_input is not None and not errors:
+        if user_input is not None and not error:
             if changed and not user_input.get("accept_certificate", False):
-                errors["base"] = "certificate_not_accepted"
+                error = "certificate_not_accepted"
             else:
-                updates = {}
-                if user_input.get(secret_key):
-                    updates[secret_key] = user_input[secret_key]
+                updates = {secret_key: user_input[secret_key]} if user_input.get(secret_key) else {}
                 if current is not None:
                     updates[CONF_CERT_FINGERPRINT] = current
-                self._config = {**data, **updates}
-                client = self._build_client("PVE" if platform in ("PVE", "CLUSTER") else platform)
-                try:
-                    validation = await self._validate_connection(
-                        client, *_VALIDATION_ENDPOINTS.get(platform, _VALIDATION_ENDPOINTS["PVE"])
-                    )
-                except CertificateMismatchError:
-                    errors["base"] = "certificate_changed"
-                except AuthenticationError:
-                    errors["base"] = "invalid_auth"
-                except ProxmoxPermissionError:
-                    errors["base"] = "insufficient_permissions"
-                except (CannotConnect, CertificateNotPinned):
-                    errors["base"] = "cannot_connect"
-                except Exception:
-                    _LOGGER.exception("Unexpected error during reauthentication")
-                    errors["base"] = "unknown"
-                else:
-                    if not validation["has_minimum"]:
-                        errors["base"] = "insufficient_permissions"
-                    else:
-                        return self.async_update_reload_and_abort(entry, data_updates=updates)
+                error = await self._reauth_check({**data, **updates}, platform)
+                if error is None:
+                    return self.async_update_reload_and_abort(entry, data_updates=updates)
 
         schema = {vol.Optional(secret_key): _SECRET}
         if changed:
@@ -705,7 +714,7 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="reauth_confirm",
             data_schema=vol.Schema(schema),
-            errors=errors,
+            errors={"base": error} if error else {},
             description_placeholders={
                 "title": entry.title,
                 "host": data[CONF_HOST],
@@ -713,6 +722,30 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "new_fingerprint": display_fingerprint(current) if current else "-",
             },
         )
+
+    async def _presented_fingerprint(self, data, platform):
+        """(fingerprint the server presents now, error key); (None, None) when verification is on."""
+        if data.get(CONF_VERIFY_SSL, False):
+            return None, None
+        try:
+            fingerprint = await self.hass.async_add_executor_job(
+                fetch_certificate_fingerprint, data[CONF_HOST], DEFAULT_PORTS.get(platform, 8006)
+            )
+        except OSError:
+            return None, "cannot_connect"
+        return fingerprint, None
+
+    async def _reauth_check(self, candidate, platform):
+        """Validate the updated credentials; returns an error key, or None when they work."""
+        self._config = candidate
+        client = self._build_client("PVE" if platform in ("PVE", "CLUSTER") else platform)
+        try:
+            validation = await self._validate_connection(
+                client, *_VALIDATION_ENDPOINTS.get(platform, _VALIDATION_ENDPOINTS["PVE"])
+            )
+        except Exception as err:  # noqa: BLE001 - every failure becomes a form error
+            return _connection_error_key(err, "reauthentication")
+        return None if validation["has_minimum"] else "insufficient_permissions"
 
     # ===== RECONFIGURE =======================================
 
@@ -726,54 +759,40 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         entry = self._get_reconfigure_entry()
         data = dict(entry.data)
         platform = _config_entry_platform(data)
-        token_only = platform in ("PBS", "PDM")
         errors = {}
 
         if user_input is not None:
-            host = str(user_input.get(CONF_HOST, "")).strip()
-            if host_error := _config_host_error(host, platform):
-                errors[CONF_HOST] = host_error
-            else:
-                candidate, secret_error = self._reconfigure_candidate(
-                    data, user_input, host, token_only
-                )
-                if not secret_error and platform == "PVE":
-                    secret_error = self._sidecar_candidate(candidate, data, user_input)
-                if secret_error:
-                    errors["base"] = secret_error
-                else:
-                    self._config = candidate
-                    confirm = await self._ensure_certificate("reconfigure", user_input)
-                    if confirm is not None:
-                        return confirm
-                    result = await self._finish_reconfigure(entry, platform)
-                    if not isinstance(result, str):
-                        return result
-                    errors["base"] = result
+            result, errors = await self._reconfigure_submit(entry, data, platform, user_input)
+            if result is not None:
+                return result
 
-        schema = {
-            vol.Required(CONF_HOST, default=data.get(CONF_HOST, "")): str,
-            vol.Required(CONF_USER, default=data.get(CONF_USER, "")): str,
-        }
-        if not token_only:
-            schema[vol.Required("use_token", default=bool(data.get(CONF_TOKEN_ID)))] = bool
-            schema[vol.Optional(CONF_PASSWORD)] = _SECRET
-        schema[vol.Optional(CONF_TOKEN_ID, default=data.get(CONF_TOKEN_ID) or "")] = str
-        schema[vol.Optional(CONF_TOKEN_SECRET)] = _SECRET
-        schema[vol.Optional(CONF_VERIFY_SSL, default=data.get(CONF_VERIFY_SSL, False))] = bool
-        if platform == "PVE":
-            stored = normalize_fingerprint(data.get(CONF_SIDECAR_FINGERPRINT))
-            schema[vol.Optional(CONF_SIDECAR_TOKEN)] = _SECRET
-            schema[vol.Optional(
-                CONF_SIDECAR_FINGERPRINT,
-                default=display_fingerprint(stored) if stored else "",
-            )] = str
         return self.async_show_form(
             step_id="reconfigure",
-            data_schema=vol.Schema(schema),
+            data_schema=_reconfigure_schema(data, platform),
             errors=errors,
             description_placeholders={"title": entry.title},
         )
+
+    async def _reconfigure_submit(self, entry, data, platform, user_input):
+        """Check and save the form: (flow result to return, or None; form errors)."""
+        host = str(user_input.get(CONF_HOST, "")).strip()
+        if host_error := _config_host_error(host, platform):
+            return None, {CONF_HOST: host_error}
+        candidate, error = self._reconfigure_candidate(
+            data, user_input, host, platform in ("PBS", "PDM")
+        )
+        if not error and platform == "PVE":
+            error = self._sidecar_candidate(candidate, data, user_input)
+        if error:
+            return None, {"base": error}
+        self._config = candidate
+        confirm = await self._ensure_certificate("reconfigure", user_input)
+        if confirm is not None:
+            return confirm, {}
+        result = await self._finish_reconfigure(entry, platform)
+        if isinstance(result, str):
+            return None, {"base": result}
+        return result, {}
 
     def _reconfigure_candidate(self, data, user_input, host, token_only):
         """Merge the form into the stored data; returns (candidate, error_key)."""
@@ -863,17 +882,8 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 await self._reconfigure_identity_error(client, entry, platform)
                 if validation["has_minimum"] else None
             )
-        except CertificateMismatchError:
-            return "certificate_changed"
-        except AuthenticationError:
-            return "invalid_auth"
-        except ProxmoxPermissionError:
-            return "insufficient_permissions"
-        except (CannotConnect, CertificateNotPinned):
-            return "cannot_connect"
-        except Exception:
-            _LOGGER.exception("Unexpected error during reconfiguration")
-            return "unknown"
+        except Exception as err:  # noqa: BLE001 - every failure becomes a form error
+            return _connection_error_key(err, "reconfiguration")
         if not validation["has_minimum"]:
             return "insufficient_permissions"
         if identity_error:
@@ -992,7 +1002,8 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         if ip == host_ip:
                             self._config[CONF_NODE] = node_name
                             return await self.async_step_select_resources()
-                    except Exception:
+                    except Exception as err:  # noqa: BLE001 - one unreachable node must not end setup
+                        _LOGGER.debug("Could not read the IP of node %s: %s", node_name, err)
                         continue
 
             # Manual mode
@@ -1016,8 +1027,8 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             if addr and not addr.startswith("127.") and ":" not in addr:
                                 ip = addr
                                 break
-                except Exception:
-                    pass
+                except Exception as err:  # noqa: BLE001 - the IP is only a label here
+                    _LOGGER.debug("Could not read the network of node %s: %s", node_name, err)
                 node_options[node_name] = f"{node_name} ({ip})" if ip else node_name
 
             if len(node_options) == 1:
@@ -1320,8 +1331,8 @@ class ProxmoxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     self._config["cluster_name"] = cluster_name
                     title_name = cluster_name
 
-            except Exception:
-                pass
+            except Exception as err:  # noqa: BLE001 - falls back to the host as the title
+                _LOGGER.debug("Could not read the cluster name from %s: %s", self._config[CONF_HOST], err)
 
             if not title_name:
                 title_name = self._config.get(CONF_HOST)

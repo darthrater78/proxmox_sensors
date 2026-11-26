@@ -24,6 +24,7 @@ class CannotConnect(Exception):
 
 
 SIDECAR_PORT = 9000
+API_TIMEOUT = 30  # seconds per Proxmox API request
 
 
 class SidecarAuthError(Exception):
@@ -187,61 +188,9 @@ class ProxmoxClient:
     def _build_client_sync(self):
         if self._server_type in ("PBS", "PDM"):
             return
-
-        port = self._port or 8006
-        timeout_val = 30
-        pinned = not self._verify_ssl
         self._build_error = None
-
         try:
-            if pinned and not self._cert_fingerprint:
-                raise CertificateNotPinned(
-                    f"Refusing to connect to {self._host}: certificate verification "
-                    "is off and no certificate fingerprint has been confirmed"
-                )
-            if self._token_id and self._token_secret:
-                api = ProxmoxAPI(
-                    self._host,
-                    user=self._user,
-                    token_name=self._token_id,
-                    token_value=self._token_secret,
-                    verify_ssl=self._verify_ssl,
-                    port=port,
-                    timeout=timeout_val,
-                )
-            elif pinned:
-                # Token auth makes no request at construction; the placeholder
-                # is replaced with pinned password auth before any request.
-                api = ProxmoxAPI(
-                    self._host,
-                    user=self._user,
-                    token_name="pinned-login-placeholder",
-                    token_value="unused",
-                    verify_ssl=False,
-                    port=port,
-                    timeout=timeout_val,
-                )
-                auth = _PinnedPasswordAuth(
-                    self._user,
-                    self._password,
-                    base_url=api._store["base_url"],
-                    session_factory=self._new_session,
-                    timeout=timeout_val,
-                )
-                api._backend.auth = auth
-                api._store["session"].auth = auth
-            else:
-                api = ProxmoxAPI(
-                    self._host,
-                    user=self._user,
-                    password=self._password,
-                    verify_ssl=True,
-                    port=port,
-                    timeout=timeout_val,
-                )
-            if pinned:
-                pin_session(api._store["session"], self._cert_fingerprint)
-            self._proxmox = api
+            self._proxmox = self._new_proxmox_api(self._port or 8006, API_TIMEOUT)
         except Exception as err:
             self._build_error = self._tls_error(err) or err
             LOGGER.error(
@@ -249,6 +198,63 @@ class ProxmoxClient:
                 self._host, self._build_error,
             )
             self._proxmox = None
+
+    def _new_proxmox_api(self, port: int, timeout: int) -> ProxmoxAPI:
+        """A ProxmoxAPI for the configured sign-in, pinned when verification is off."""
+        pinned = not self._verify_ssl
+        if pinned and not self._cert_fingerprint:
+            raise CertificateNotPinned(
+                f"Refusing to connect to {self._host}: certificate verification "
+                "is off and no certificate fingerprint has been confirmed"
+            )
+        if self._token_id and self._token_secret:
+            api = ProxmoxAPI(
+                self._host,
+                user=self._user,
+                token_name=self._token_id,
+                token_value=self._token_secret,
+                verify_ssl=self._verify_ssl,
+                port=port,
+                timeout=timeout,
+            )
+        elif pinned:
+            api = self._pinned_password_api(port, timeout)
+        else:
+            api = ProxmoxAPI(
+                self._host,
+                user=self._user,
+                password=self._password,
+                verify_ssl=True,
+                port=port,
+                timeout=timeout,
+            )
+        if pinned:
+            pin_session(api._store["session"], self._cert_fingerprint)
+        return api
+
+    def _pinned_password_api(self, port: int, timeout: int) -> ProxmoxAPI:
+        """Password sign-in whose ticket request goes through the pinned session."""
+        # Token auth makes no request at construction; the placeholder
+        # is replaced with pinned password auth before any request.
+        api = ProxmoxAPI(
+            self._host,
+            user=self._user,
+            token_name="pinned-login-placeholder",
+            token_value="unused",
+            verify_ssl=False,
+            port=port,
+            timeout=timeout,
+        )
+        auth = _PinnedPasswordAuth(
+            self._user,
+            self._password,
+            base_url=api._store["base_url"],
+            session_factory=self._new_session,
+            timeout=timeout,
+        )
+        api._backend.auth = auth
+        api._store["session"].auth = auth
+        return api
 
     async def get_api_client(self, hass):
         if self._server_type in ("PBS", "PDM"):
