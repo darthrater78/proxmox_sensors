@@ -35,6 +35,13 @@ DEFAULT_PORT = 9000
 MAX_CONCURRENT_REQUESTS = 8
 REQUEST_TIMEOUT = 15  # seconds a client may take to send its request
 MIN_TOKEN_LENGTH = 32
+MAX_LOG_LENGTH = 500
+
+
+def _log(message):
+    """One line to stderr (the systemd journal), control characters removed."""
+    text = "".join(ch if ch.isprintable() else " " for ch in str(message))
+    print(f"PVE Sensors API: {text[:MAX_LOG_LENGTH]}", file=sys.stderr, flush=True)
 
 
 class SidecarConfig:
@@ -301,7 +308,7 @@ class Handler(BaseHTTPRequestHandler):
                     pass
             self._send_json_response(data)
         except Exception as e:
-            self._send_error_response(f"Error getting sensors: {e}")
+            self._send_error_response("Error getting sensors", e)
 
     def _handle_smart(self):
         """Handle SMART data - optimized version."""
@@ -309,7 +316,7 @@ class Handler(BaseHTTPRequestHandler):
             smart_data = self._get_smart_data_fast()
             self._send_json_response(json.dumps(smart_data))
         except Exception as e:
-            self._send_error_response(f"Error getting SMART data: {e}")
+            self._send_error_response("Error getting SMART data", e)
 
     def _handle_smart_disk(self):
         """Query one inventory-selected block device, without a global scan."""
@@ -390,7 +397,7 @@ class Handler(BaseHTTPRequestHandler):
             smart_data = self._get_smart_data_extended()
             self._send_json_response(json.dumps(smart_data))
         except Exception as e:
-            self._send_error_response(f"Error: {e}")
+            self._send_error_response("Error getting extended SMART data", e)
 
     def _handle_memory(self):
         """Handle memory information from dmidecode."""
@@ -401,7 +408,7 @@ class Handler(BaseHTTPRequestHandler):
             )
 
             if result.returncode != 0:
-                self._send_error_response(f"dmidecode failed: {result.stderr}")
+                self._send_error_response("dmidecode failed", result.stderr.strip())
                 return
 
             memory_data = []
@@ -462,7 +469,7 @@ class Handler(BaseHTTPRequestHandler):
         except subprocess.TimeoutExpired:
             self._send_error_response("dmidecode timeout (10s)")
         except Exception as e:
-            self._send_error_response(f"Error getting memory info: {e}")
+            self._send_error_response("Error getting memory info", e)
 
     def _handle_health(self):
         """Return health status."""
@@ -482,7 +489,7 @@ class Handler(BaseHTTPRequestHandler):
             }
             self._send_json_response(json.dumps(health_data))
         except Exception as e:
-            self._send_error_response(f"Error: {e}")
+            self._send_error_response("Error getting health status", e)
 
     def _handle_mounts(self):
         """Handle disk mount status via lsblk."""
@@ -495,7 +502,7 @@ class Handler(BaseHTTPRequestHandler):
             )
 
             if result.returncode != 0:
-                self._send_error_response(f"lsblk failed: {result.stderr}")
+                self._send_error_response("lsblk failed", result.stderr.strip())
                 return
 
             raw = json.loads(result.stdout)
@@ -561,8 +568,8 @@ class Handler(BaseHTTPRequestHandler):
 
                             df_mounts.append({"source": source, "target": target})
 
-            except Exception:
-                pass
+            except (OSError, ValueError, subprocess.TimeoutExpired) as err:
+                _log(f"df mount listing failed: {err}")
 
             response = {
                 "mounted": mounted,
@@ -575,7 +582,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json_response(json.dumps(response))
 
         except Exception as e:
-            self._send_error_response(f"Error getting mount info: {e}")
+            self._send_error_response("Error getting mount info", e)
 
     def _handle_ksm(self):
         """Expose a fixed, read-only KSM snapshot without client-controlled commands."""
@@ -658,8 +665,9 @@ class Handler(BaseHTTPRequestHandler):
 
             return smart_data
 
-        except Exception as e:
-            return {"error": f"Scan failed: {str(e)}"}
+        except Exception as e:  # noqa: BLE001 - report any scan failure as a payload
+            _log(f"SMART scan failed: {e}")
+            return {"error": "SMART scan failed"}
 
     def _get_smart_data_extended(self):
         """Get extended SMART data with retry logic."""
@@ -682,10 +690,20 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 base_cmd = ["smartctl", "-a", "-d", "sat"]
 
-            cmd_json = base_cmd + ["-j", device]
+            # -n standby: a disk that is spun down is reported, not woken.
+            # Exit code 3 is smartctl's "device is in standby" for this flag.
+            cmd_json = base_cmd + ["-n", "standby,3", "-j", device]
             result = subprocess.run(
                 cmd_json, capture_output=True, text=True, timeout=timeout
             )
+            if result.returncode == 3:
+                return {
+                    "model": "Device (standby)",
+                    "smart_available": False,
+                    "standby": True,
+                    "device_type": device_type,
+                    "path": device,
+                }
 
             if result.returncode == 0:
                 disk_info = json.loads(result.stdout)
@@ -701,8 +719,8 @@ class Handler(BaseHTTPRequestHandler):
                         result_info.stdout, result.returncode
                     )
 
-        except (subprocess.TimeoutExpired, json.JSONDecodeError, Exception):
-            pass
+        except (OSError, ValueError, subprocess.TimeoutExpired) as err:
+            _log(f"SMART query for {device} failed: {err}")
 
         return None
 
@@ -973,8 +991,8 @@ class Handler(BaseHTTPRequestHandler):
                         bytes_str = match.group(1).replace(",", "").replace(".", "")
                         bytes_val = int(bytes_str)
                         parsed["capacity_gb"] = round(bytes_val / (1024**3), 1)
-                    except:
-                        pass
+                    except ValueError:
+                        pass  # unparsable capacity: leave the field out
 
         return parsed
 
@@ -1124,8 +1142,8 @@ class Handler(BaseHTTPRequestHandler):
                             if match:
                                 detailed["uncorrectable_errors"] = int(match.group(4))
 
-        except Exception:
-            pass
+        except (OSError, ValueError, subprocess.TimeoutExpired) as err:
+            _log(f"Detailed SMART query for {device} failed: {err}")
 
         return detailed
 
@@ -1133,7 +1151,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             result = subprocess.run(["sensors", "-v"], capture_output=True, timeout=3)
             return result.returncode == 0
-        except Exception:
+        except (OSError, subprocess.TimeoutExpired):
             return False
 
     def _check_smartctl(self):
@@ -1142,7 +1160,7 @@ class Handler(BaseHTTPRequestHandler):
                 ["smartctl", "--version"], capture_output=True, timeout=3
             )
             return result.returncode == 0
-        except Exception:
+        except (OSError, subprocess.TimeoutExpired):
             return False
 
     def _get_disk_health_summary(self):
@@ -1158,7 +1176,8 @@ class Handler(BaseHTTPRequestHandler):
                     failed += 1
 
             return {"working": working, "failed": failed, "total": working + failed}
-        except Exception:
+        except (AttributeError, TypeError) as err:
+            _log(f"Disk health summary failed: {err}")
             return {"working": 0, "failed": 0, "total": 0}
 
     def _send_json_response(self, data):
@@ -1170,7 +1189,14 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_error_response(self, message):
+    def _send_error_response(self, message, detail=None):
+        """Send a fixed 500 message; the detail goes to the journal, never the client.
+
+        Exception text and command stderr can carry device paths, serial
+        numbers and other host details, so the client only sees ``message``.
+        """
+        if detail is not None:
+            _log(f"{urlsplit(self.path).path}: {message}: {detail}")
         self._send_status_json(500, message)
 
     def log_message(self, format, *args):

@@ -476,6 +476,8 @@ How this fork is built, and later changed, with regard to security. Every securi
 - **Sandbox.** The systemd unit sets `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `NoNewPrivileges`, kernel-module/log/cgroup protection, namespace and address-family restrictions; it keeps raw device access, which SMART needs.
 - **Verified installs.** The installer installs only a sidecar matching the release's `SHA256SUMS`.
 - **Legacy mode.** `--legacy-http` (plain HTTP, allow-list only) stays available for compatibility; Home Assistant flags such a sidecar with a repair warning.
+- **Errors stay on the node.** A failing endpoint answers with a fixed message such as `dmidecode failed`; exception text and command output, which can name devices and serial numbers, go only to the node's journal (`journalctl -u pve-sensors`).
+- **Sleeping disks stay asleep.** The SMART scan queries disks with `smartctl -n standby`, so a spun-down disk is reported as in standby, not woken; Home Assistant keeps that disk's last reading.
 
 **Transport security (Proxmox APIs)**
 

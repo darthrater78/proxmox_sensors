@@ -27,6 +27,9 @@ Releases before the fork are listed in the
 - The sidecar installer downloads from this fork's releases and installs the
   sidecar only if it matches the release's `SHA256SUMS`. It no longer
   downloads from upstream's `main` branch.
+- Sidecar error responses no longer include exception text or command
+  output, which could reveal device paths and serial numbers; the details
+  are written to the node's journal instead.
 
 ### Added
 - Reauthentication flow: a rotated password or token, or a changed server
@@ -47,6 +50,14 @@ Releases before the fork are listed in the
   certificate, or rejects the token.
 - Sidecar installer options: `--version`, `--local`, `--allowed-ips`
   (non-interactive), `--rotate-token`, `--rotate-cert`, `--legacy-http`.
+- CI for the fork: hassfest and HACS validation, ruff, pytest with the Home
+  Assistant test harness, shellcheck, and actionlint for the workflows.
+- Release workflow: publishes only from tags on `main` whose commit passed CI
+  and whose `manifest.json` version matches the tag, and attaches the sidecar
+  and installer with `SHA256SUMS` and a signed build-provenance attestation.
+- CodeQL scanning, dependency review on pull requests, a weekly `pip-audit`
+  report, and Dependabot for GitHub Actions and Python dependencies.
+- Security architecture section in the README.
 
 ### Fixed
 - The VM/CT selection on the options page no longer disappears when another
@@ -57,14 +68,14 @@ Releases before the fork are listed in the
 - A stale stored option can no longer silently override a PVE setting just
   saved on the options page.
 - Wake-on-LAN MAC addresses are validated on the PVE and PBS options pages.
-- CI for the fork: hassfest and HACS validation, ruff, pytest with the Home
-  Assistant test harness, shellcheck, and actionlint for the workflows.
-- Release workflow: publishes only from tags on `main` whose commit passed CI
-  and whose `manifest.json` version matches the tag, and attaches the sidecar
-  and installer with `SHA256SUMS` and a signed build-provenance attestation.
-- CodeQL scanning, dependency review on pull requests, a weekly `pip-audit`
-  report, and Dependabot for GitHub Actions and Python dependencies.
-- Security architecture section in the README.
+- The sidecar's full SMART scan no longer spins up sleeping disks; a disk in
+  standby keeps its last reading in Home Assistant.
+- An error message that merely contained "401" or "403" (a VM ID, a storage
+  name) no longer counts as an authentication failure and starts a
+  reauthentication prompt.
+- A rejected password now starts the reauthentication prompt instead of
+  showing the server as unreachable.
+- Sidecar errors that were silently ignored are now logged to the journal.
 
 ### Changed
 - **Re-running the sidecar installer switches the sidecar to HTTPS with a
@@ -74,6 +85,7 @@ Releases before the fork are listed in the
   Assistant shows a repair warning while a sidecar uses it.
 - `manifest.json`, the README and the issue template point at this fork
   instead of upstream; HACS installs it as a custom repository.
+- `proxmoxer` is limited to the 2.x series it is tested with.
 
 ### Removed
 - The upstream documentation website (Astro, GitHub Pages, `CNAME` for

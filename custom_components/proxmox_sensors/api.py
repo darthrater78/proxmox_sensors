@@ -47,6 +47,14 @@ class CertificateMismatchError(AuthenticationError):
     """
 
 
+class _TicketRejected(ProxmoxerAuthenticationError):
+    """The /access/ticket login failed with this HTTP status."""
+
+    def __init__(self, message: str, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
 class _PinnedPasswordAuth(ProxmoxHTTPAuth):
     """proxmoxer password auth whose ticket requests go through a pinned session.
 
@@ -73,8 +81,9 @@ class _PinnedPasswordAuth(ProxmoxHTTPAuth):
                 timeout=self.timeout,
             )
         if response.status_code != 200:
-            raise ProxmoxerAuthenticationError(
-                f"Couldn't authenticate user: {self.username} code: {response.status_code}"
+            raise _TicketRejected(
+                f"Couldn't authenticate user: {self.username} code: {response.status_code}",
+                response.status_code,
             )
         data = response.json()["data"]
         if data.get("NeedTFA") is not None:
@@ -107,11 +116,14 @@ def _extract_status_code(err: Exception) -> int | None:
     if status_code:
         return int(status_code)
 
-    message = str(err)
-    for code in (401, 403):
-        if str(code) in message:
-            return code
+    # proxmoxer's own password login raises this with no status attached;
+    # it only ever means the credentials (or 2FA) were refused.
+    if isinstance(err, ProxmoxerAuthenticationError):
+        return 401
 
+    # No substring matching on str(err): any message that merely contains
+    # "401" or "403" (a VMID, a port, a byte count) would read as an auth
+    # failure and start a reauth flow.
     return None
 
 
